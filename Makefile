@@ -1,16 +1,18 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -g -I./include
-SRCS = src/main.c src/config.c src/check.c src/utils.c
-OBJS = $(SRCS:.c=.o)
+CXX = g++
+CXXFLAGS = -Wall -Wextra -g -I./include -std=c++17
+LDFLAGS = -lfmt -lpthread
+
+SRCS = src/main.cpp src/config.cpp src/check.cpp src/utils.cpp
+OBJS = $(SRCS:.cpp=.o)
 TARGET = baseline-guard
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
-src/%.o: src/%.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+src/%.o: src/%.cpp
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 test: $(TARGET)
 	./test/test.sh
