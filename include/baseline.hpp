@@ -2,13 +2,16 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <cstdint>
+
 
 enum class Action {
     LOG,
     ALERT,
     THROTTLE,
     BLOCK,
-    KILL
+    KILL,
+    UNKNOWN,
 };
 
 struct Rule {

@@ -2,10 +2,15 @@
 #include "config.hpp"
 #include "utils.hpp"
 #include "spdlog/spdlog.h"
+#include <unistd.h>
+#include <stdio.h>
 
 
 
-int main(int argc, char **argv) {
+int main(int argc, char *argv[]) {
+    // printf("------------------------------------");
+    // // sleep(5); 
+    // return 1;
 
     // 设置全局日志级别（默认是 info，低于它的 debug/trace 不会输出）
     spdlog::set_level(spdlog::level::debug);
@@ -38,7 +43,12 @@ int main(int argc, char **argv) {
         }
     }
     
-    if (!config_path) {
+    if (config_path) {
+        auto rules = parseIniFile(config_path);
+    
+        // 打印结果
+        printRules(rules);
+
         // usage(argv[0]);
         return 1;
     }

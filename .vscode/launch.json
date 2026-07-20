@@ -1,0 +1,47 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        // {
+        //     "name": "C++ Debug",
+        //     "type": "cppdbg",
+        //     "request": "launch",
+        //     "program": "${workspaceFolder}/baseline-guard",
+        //     "args": [],
+        //     "stopAtEntry": true,
+        //     "cwd": "${workspaceFolder}",
+        //     "environment": [],
+        //     "externalConsole": false,
+        //     "MIMode": "gdb",
+        //     "miDebuggerPath": "/usr/bin/gdb",
+        //     "setupCommands": [
+        //         {
+        //             "description": "Enable pretty-printing",
+        //             "text": "-enable-pretty-printing",
+        //             "ignoreFailures": true
+        //         },
+        //         {
+        //             "description": "Disable debuginfod",
+        //             "text": "set debuginfod enabled off",
+        //             "ignoreFailures": true
+        //         }
+        //     ],
+        //     "preLaunchTask": "build-A"
+        // }
+{
+            "name": "gdb 调试 a (Native Debug)",
+            "type": "gdb",
+            "request": "launch",
+            "target": "${workspaceFolder}/baseline-guard",
+            "arguments": "-c  test/baseline.ini",
+            "cwd": "${workspaceFolder}",
+            "valuesFormatting": "prettyPrinters",
+            "gdbpath": "/usr/bin/gdb",
+            "autorun": [
+                "set pagination off",
+                "set debuginfod enabled off"
+            ],
+            "preLaunchTask": "buildA"
+        }
+
+    ]
+}
