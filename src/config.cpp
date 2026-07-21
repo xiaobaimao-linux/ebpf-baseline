@@ -12,10 +12,14 @@
 using namespace std;
 
 
+
 // 将字符串转为 Action 枚举
 Action stringToAction(const std::string& str) {
     if (str == "allow") return Action::LOG;
     if (str == "block") return Action::BLOCK;
+    if (str == "alert") return Action::ALERT;
+    if (str == "kill") return Action::KILL;
+    if (str == "throttle") return Action::THROTTLE;
     return Action::UNKNOWN;
 }
 
@@ -24,6 +28,9 @@ std::string actionToString(Action action) {
     switch (action) {
         case Action::LOG: return "allow";
         case Action::BLOCK: return "block";
+        case Action::ALERT: return "alert";
+        case Action::KILL: return "kill";
+        case Action::THROTTLE: return "throttle";       
         default: return "unknown";
     }
 }

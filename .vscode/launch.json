@@ -27,7 +27,7 @@
         //     ],
         //     "preLaunchTask": "build-A"
         // }
-{
+        {
             "name": "gdb 调试 a (Native Debug)",
             "type": "gdb",
             "request": "launch",
@@ -42,6 +42,5 @@
             ],
             "preLaunchTask": "buildA"
         }
-
     ]
 }
