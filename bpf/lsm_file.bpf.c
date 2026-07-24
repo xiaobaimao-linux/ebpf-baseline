@@ -7,6 +7,8 @@
 
 char LICENSE[] SEC("license") = "GPL";
 
+#define EPERM 1
+
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 256 * 1024);
@@ -16,8 +18,8 @@ struct {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 64);
-    __type(key, unsigned long); // inode
-    __type(value, u8);          // 1=monitor
+    __type(key, unsigned long);   // inode
+    __type(value, unsigned char); // 1=monitor
 } monitor_inodes SEC(".maps");
 
 struct print_ctx {
@@ -32,6 +34,7 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
     char ignore_comm[] = "baseline-guard";
     char comm[16] = {};
     unsigned long ino;
+    unsigned char action = ACTION_ALERT; // 默认
 
     bpf_get_current_comm(comm, sizeof(comm));
     if (bpf_strncmp(comm, sizeof(comm), "baseline-guard") == 0) {
@@ -42,7 +45,6 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
 
     u8 *monitor = bpf_map_lookup_elem(&monitor_inodes, &ino);
     if (!monitor) {
-
         return 0;
     }
 
@@ -54,12 +56,18 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
     e->pid = bpf_get_current_pid_tgid() >> 32;
     __builtin_memcpy(e->comm, comm, sizeof(comm));
     e->ino = ino;
+    e->action = *monitor;
     e->mask = mask;
+    action = *monitor;
 
     // 路径可选
     struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
     bpf_probe_read_str(e->path, sizeof(e->path), BPF_CORE_READ(dentry, d_name.name));
 
     bpf_ringbuf_submit(e, 0);
+
+    // 使用
+    if (action == ACTION_BLOCK)
+        return -EPERM;
     return 0;
 }

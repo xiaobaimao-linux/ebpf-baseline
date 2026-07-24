@@ -20,8 +20,30 @@ void signal_handler(int) {
 
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     auto *e = static_cast<struct event *>(data);
-    std::cout << "[ALERT] pid=" << e->pid << " comm=" << e->comm << " path=" << e->path
+
+    const char *action_str = "UNKNOWN";
+    switch (e->action) {
+    case ACTION_LOG:
+        action_str = "LOG";
+        break;
+    case ACTION_ALERT:
+        action_str = "ALERT";
+        break;
+    case ACTION_THROTTLE:
+        action_str = "THROTTLE";
+        break;
+    case ACTION_BLOCK:
+        action_str = "BLOCK";
+        break;
+    case ACTION_KILL:
+        action_str = "KILL";
+        break;
+    }
+
+    std::cout << "[" << action_str << "] "
+              << "pid=" << e->pid << " comm=" << e->comm << " path=" << e->path
               << " mask=" << e->mask << std::endl;
+
     return 0;
 }
 
@@ -47,9 +69,9 @@ int do_monitor(const Config &config) {
 
     // 将配置文件中的路径写入 BPF map
     for (const auto &rule : config.rules) {
-        uint8_t val = 1;
-        bpf_map__update_elem(skel->maps.monitor_inodes, &rule.ino, sizeof(rule.ino), &val,
-                             sizeof(val), BPF_ANY);
+        unsigned char action = static_cast<unsigned char>(rule.action);
+        bpf_map__update_elem(skel->maps.monitor_inodes, &rule.ino, sizeof(rule.ino), &action,
+                             sizeof(action), BPF_ANY);
     }
 
     std::cout << "Monitoring started. Press Ctrl+C to stop." << std::endl;
