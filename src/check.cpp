@@ -8,6 +8,7 @@ int do_check(const Config& config) {
     
     for (const auto& rule : config.rules) {
         struct stat st;
+        bool rule_failed = false;   
         
         // 1. 检查文件是否存在
         if (stat(rule.path.c_str(), &st) < 0) {
@@ -23,7 +24,7 @@ int do_check(const Config& config) {
         } else {
             log_fail(rule.name, rule.path + " mode " + mode_to_string(actual_mode) + 
                      ", expected " + mode_to_string(rule.mode));
-            fail_count++;
+            rule_failed = true;
         }
         
         // 3. 检查hash（如果有）
@@ -33,8 +34,11 @@ int do_check(const Config& config) {
                 log_pass(rule.name, "hash匹配");
             } else {
                 log_fail(rule.name, "hash不匹配");
-                fail_count++;
+                rule_failed = true;
             }
+        }
+        if (rule_failed) {
+            fail_count++;
         }
     }
     
