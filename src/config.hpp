@@ -27,5 +27,6 @@ vector<Rule> parseIniFile(const string& filename);
 // 打印规则列表（调试用）
 void printRules(const vector<Rule>& rules);
 
+void compute_inodes(Config& config);
 
 #endif

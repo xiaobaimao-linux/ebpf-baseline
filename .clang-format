@@ -1,0 +1,5 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+BreakBeforeBraces: Attach  # K&R 风格，大括号紧跟
+AllowShortFunctionsOnASingleLine: false

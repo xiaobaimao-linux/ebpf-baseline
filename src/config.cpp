@@ -14,7 +14,7 @@ using namespace std;
 
 
 // 将字符串转为 Action 枚举
-Action stringToAction(const std::string& str) {
+Action stringToAction(const string& str) {
     if (str == "allow") return Action::LOG;
     if (str == "block") return Action::BLOCK;
     if (str == "alert") return Action::ALERT;
@@ -24,7 +24,7 @@ Action stringToAction(const std::string& str) {
 }
 
 // 将 Action 枚举转为字符串（用于打印）
-std::string actionToString(Action action) {
+string actionToString(Action action) {
     switch (action) {
         case Action::LOG: return "allow";
         case Action::BLOCK: return "block";
@@ -35,13 +35,24 @@ std::string actionToString(Action action) {
     }
 }
 
+void compute_inodes(Config& config) {
+    for (auto& rule : config.rules) {
+        struct stat st;
+        if (stat(rule.path.c_str(), &st) == 0) {
+            rule.ino = st.st_ino;
+        } else {
+            rule.ino = 0;  // 文件不存在
+        }
+    }
+}
+
 // 解析单个 section 的键值对
-std::unordered_map<std::string, std::string> parseSection(const std::string& content) {
-    std::unordered_map<std::string, std::string> kv;
-    std::istringstream stream(content);
-    std::string line;
+unordered_map<string, string> parseSection(const string& content) {
+    unordered_map<string, string> kv;
+    istringstream stream(content);
+    string line;
     
-    while (std::getline(stream, line)) {
+    while (getline(stream, line)) {
         // 去除前后空白
         line.erase(0, line.find_first_not_of(" \t\r\n"));
         line.erase(line.find_last_not_of(" \t\r\n") + 1);
@@ -50,10 +61,10 @@ std::unordered_map<std::string, std::string> parseSection(const std::string& con
         if (line.empty() || line[0] == '#' || line[0] == ';') continue;
         
         size_t eq_pos = line.find('=');
-        if (eq_pos == std::string::npos) continue;
+        if (eq_pos == string::npos) continue;
         
-        std::string key = line.substr(0, eq_pos);
-        std::string value = line.substr(eq_pos + 1);
+        string key = line.substr(0, eq_pos);
+        string value = line.substr(eq_pos + 1);
         
         // 去除 key/value 的空白
         key.erase(0, key.find_first_not_of(" \t"));
@@ -68,26 +79,26 @@ std::unordered_map<std::string, std::string> parseSection(const std::string& con
 }
 
 // 解析 INI 文件内容，返回 Rule 列表
-std::vector<Rule> parseIniFile(const std::string& filename) {
-    std::vector<Rule> rules;
-    std::ifstream file(filename);
+vector<Rule> parseIniFile(const string& filename) {
+    vector<Rule> rules;
+    ifstream file(filename);
     
     if (!file.is_open()) {
         spdlog::error("无法打开文件: {}", filename);
         return rules;
     }
     
-    std::string line;
-    std::string currentSection;
-    std::string sectionContent;
-    std::regex sectionRegex(R"(\[([^\]]+)\])");
+    string line;
+    string currentSection;
+    string sectionContent;
+    regex sectionRegex(R"(\[([^\]]+)\])");
     
-    while (std::getline(file, line)) {
+    while (getline(file, line)) {
         // 去除行尾回车
         if (!line.empty() && line.back() == '\r') line.pop_back();
         
-        std::smatch match;
-        if (std::regex_match(line, match, sectionRegex)) {
+        smatch match;
+        if (regex_match(line, match, sectionRegex)) {
             // 处理上一个 section
             if (!currentSection.empty() && !sectionContent.empty()) {
                 auto kv = parseSection(sectionContent);
@@ -99,7 +110,7 @@ std::vector<Rule> parseIniFile(const std::string& filename) {
                 if (kv.count("mode")) {
                     try {
                         // 解析八进制权限（如 600）
-                        rule.mode = std::stoul(kv["mode"], nullptr, 8);
+                        rule.mode = stoul(kv["mode"], nullptr, 8);
                     } catch (...) {
                         spdlog::warn("无法解析 mode 值: {} (section: {})", kv["mode"], currentSection);
                     }
@@ -113,8 +124,8 @@ std::vector<Rule> parseIniFile(const std::string& filename) {
                 }
                 
                 rules.push_back(rule);
-                spdlog::debug("解析规则: name={}, path={}, mode={:o}, hash={}, action={}",
-                              rule.name, rule.path, rule.mode,
+                spdlog::debug("解析规则: name={}, path={}, inode={}, mode={:o}, hash={}, action={}",
+                              rule.name, rule.path, rule.ino,rule.mode,
                               rule.has_hash ? rule.hash : "(无)",
                               actionToString(rule.action));
             }
@@ -137,7 +148,7 @@ std::vector<Rule> parseIniFile(const std::string& filename) {
         if (kv.count("path")) rule.path = kv["path"];
         if (kv.count("mode")) {
             try {
-                rule.mode = std::stoul(kv["mode"], nullptr, 8);
+                rule.mode = stoul(kv["mode"], nullptr, 8);
             } catch (...) {
                 spdlog::warn("无法解析 mode 值: {} (section: {})", kv["mode"], currentSection);
             }
@@ -158,7 +169,7 @@ std::vector<Rule> parseIniFile(const std::string& filename) {
 }
 
 // 打印规则列表
-void printRules(const std::vector<Rule>& rules) {
+void printRules(const vector<Rule>& rules) {
     spdlog::info("共解析 {} 条规则:", rules.size());
     for (const auto& rule : rules) {
         spdlog::info("  [{}]", rule.name);
@@ -172,18 +183,3 @@ void printRules(const std::vector<Rule>& rules) {
         spdlog::info("    action: {}", actionToString(rule.action));
     }
 }
-
-// // 使用示例
-// int main() {
-//     // 设置日志级别
-//     spdlog::set_level(spdlog::level::debug);
-//     spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] %v");
-    
-//     // 解析 INI 文件
-//     auto rules = parseIniFile("/home/sf/rules.ini");
-    
-//     // 打印结果
-//     printRules(rules);
-    
-//     return 0;
-// }
