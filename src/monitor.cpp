@@ -71,9 +71,6 @@ int do_monitor(const Config &config) {
             std::cerr << "Error polling ring buffer: " << err << std::endl;
             break;
         }
-        if (count > 1000) {
-            break; // For testing, exit after 1000 iterations
-        }
     }
 
     std::cout << "Monitoring stopped." << std::endl;
