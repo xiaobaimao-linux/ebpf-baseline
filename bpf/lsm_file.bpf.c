@@ -14,13 +14,13 @@ struct {
     __uint(max_entries, 256 * 1024);
 } rb SEC(".maps");
 
-// 存储要监控的文件indoe（从用户态传入）
+// 存储要监控的文件indoe（从用户态传入）和对应的action（0-4）
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 64);
     __type(key, unsigned long);   // inode
-    __type(value, unsigned char); // 1=monitor
-} monitor_inodes SEC(".maps");
+    __type(value, unsigned char); // action
+} monitor_actions SEC(".maps");
 
 struct print_ctx {
     u32 count;
@@ -43,10 +43,12 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
 
     ino = BPF_CORE_READ(file, f_inode, i_ino);
 
-    u8 *monitor = bpf_map_lookup_elem(&monitor_inodes, &ino);
-    if (!monitor) {
+    // 查 action（存在即监控，不存在则忽略）
+    u8 *action_ptr = bpf_map_lookup_elem(&monitor_actions, &ino);
+    if (!action_ptr)
         return 0;
-    }
+
+    action = *action_ptr;
 
     // 匹配成功
     struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
@@ -56,11 +58,9 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
     e->pid = bpf_get_current_pid_tgid() >> 32;
     __builtin_memcpy(e->comm, comm, sizeof(comm));
     e->ino = ino;
-    e->action = *monitor;
+    e->action = action;
     e->mask = mask;
-    action = *monitor;
 
-    // 路径可选
     struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
     bpf_probe_read_str(e->path, sizeof(e->path), BPF_CORE_READ(dentry, d_name.name));
 
