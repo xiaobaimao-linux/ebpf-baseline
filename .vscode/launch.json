@@ -32,7 +32,7 @@
             "type": "gdb",
             "request": "launch",
             "target": "${workspaceFolder}/baseline-guard",
-            "arguments": "-c  test/basesimple.ini --monitor",
+            "arguments": "-c  baselines/default.yaml --monitor",
             "cwd": "${workspaceFolder}",
             "valuesFormatting": "prettyPrinters",
             "gdbpath": "/usr/bin/gdb",

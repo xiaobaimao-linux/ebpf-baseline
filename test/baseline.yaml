@@ -1,0 +1,16 @@
+rules:
+  - id: SYS-001
+    name: "/etc/passwd 权限监控"
+    severity: critical
+    check:
+      type: file_permission
+      path: /etc/passwd
+      expected: "0644"
+
+  - id: SYS-002
+    name: "/etc/shadow 权限监控"
+    severity: critical
+    check:
+      type: file_permission
+      path: /etc/shadow
+      expected: "0000"

@@ -24,6 +24,9 @@ unordered_map<string, string> parseSection(const string& content);
 // 解析整个 INI 文件，返回 Rule 列表
 vector<Rule> parseIniFile(const string& filename);
 
+// 解析 YAML 文件，返回 Rule 列表
+vector<Rule> parseYamlFile(const string& filename);
+
 // 打印规则列表（调试用）
 void printRules(const vector<Rule>& rules);
 

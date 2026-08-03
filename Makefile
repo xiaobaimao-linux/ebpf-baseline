@@ -7,7 +7,7 @@ BPF_CFLAGS = -target bpf -D__TARGET_ARCH_x86_64 \
              -I/usr/include/x86_64-linux-gnu \
              -I/usr/include/bpf -g -O2
 
-LDFLAGS = -lbpf -lssl -lcrypto -lfmt
+LDFLAGS = -lbpf -lssl -lcrypto -lfmt -lyaml-cpp
 
 TARGET = baseline-guard
 

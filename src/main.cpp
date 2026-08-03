@@ -16,6 +16,15 @@ static struct option long_options[] = {{"config", required_argument, 0, 'c'},
                                        {"monitor", no_argument, 0, 'm'}, // 返回 'm'
                                        {0, 0, 0, 0}};
 
+
+
+// 辅助函数：判断字符串是否以指定后缀结尾
+static bool ends_with(const string& str, const string& suffix) {
+    if (suffix.size() > str.size()) return false;
+    return equal(suffix.rbegin(), suffix.rend(), str.rbegin());
+}
+
+
 int main(int argc, char *argv[]) {
 
     // 设置全局日志级别（默认是 info，低于它的 debug/trace 不会输出）
@@ -83,7 +92,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    auto rules = parseIniFile(config_path);
+    vector<Rule> rules;
+    if (ends_with(config_path, ".yaml") || ends_with(config_path, ".yml")) {
+        rules = parseYamlFile(config_path);
+    } else {
+        rules = parseIniFile(config_path);
+    }
 
     // 打印结果
     printRules(rules);
