@@ -16,7 +16,7 @@ BPF_OBJ = bpf/lsm_file.bpf.o
 BPF_SKEL = bpf/lsm_file.skel.h
 
 # 用户态源文件
-MAIN_SRCS = src/main.cpp src/config.cpp src/check.cpp src/utils.cpp src/commonfun.cpp src/alert_manager.cpp
+MAIN_SRCS = src/main.cpp src/config.cpp src/check.cpp src/utils.cpp src/commonfun.cpp src/alert_manager.cpp src/report_generator.cpp
 MONITOR_SRC = src/monitor.cpp
 
 OBJS = $(MAIN_SRCS:.cpp=.o) $(MONITOR_SRC:.cpp=.o)
@@ -49,6 +49,9 @@ src/commonfun.o: src/commonfun.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 src/alert_manager.o: src/alert_manager.cpp
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+src/report_generator.o: src/report_generator.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # 依赖 skel.h 的源文件

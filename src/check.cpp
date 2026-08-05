@@ -1,5 +1,8 @@
 #include "check.hpp"
 #include "utils.hpp"
+#include "report_generator.hpp"
+#include "commonfun.hpp"
+
 #include <sys/stat.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -11,6 +14,7 @@
 int do_check(const Config& config, BaselineDB& db) {
     int fail_count = 0;
     int pass_count = 0;
+    std::vector<CheckResult> results;
 
     for (const auto& rule : config.rules) {
         if (!rule.has_check) {
@@ -52,6 +56,7 @@ int do_check(const Config& config, BaselineDB& db) {
             }
         }
 
+        // 保存结果到sqlite
         BaselineRecord record;
         record.file_path = target_path;
         record.permission = mode_to_string(actual_mode);
@@ -66,6 +71,20 @@ int do_check(const Config& config, BaselineDB& db) {
         record.recorded_at = ss.str();
 
         db.SaveBaseline(record);
+
+        // 生成HTML结果记录
+
+        CheckResult r;
+        r.rule_id = rule.id;
+        r.rule_name = rule.name;
+        r.file_path = rule.check_path;
+        r.expected = rule.check_mode;
+        r.actual = mode_to_string(actual_mode);
+        r.passed = (r.expected == r.actual);
+        r.severity = rule.severity;
+        results.push_back(r);
+
+        // 打印log
         spdlog::info("[baseline_created] path={}, permission={}, hash={}, recorded_at={}",
                      record.file_path, record.permission,
                      record.hash.empty() ? "(none)" : record.hash,
@@ -77,7 +96,15 @@ int do_check(const Config& config, BaselineDB& db) {
             pass_count++;
         }
     }
-
+    
     spdlog::info("检查完成: {} 通过, {} 失败", pass_count, fail_count);
+
+     // 生成报告
+    std::string report_path = "/var/log/baseline-guard/report-" + NowString() + ".html";
+    ReportGenerator gen;
+    if (gen.GenerateHtml(results, report_path)) {
+        spdlog::info("Report generated: {}", report_path);
+    }
+
     return fail_count > 0 ? 1 : 0;
 }
