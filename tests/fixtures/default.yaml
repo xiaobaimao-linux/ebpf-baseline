@@ -73,6 +73,6 @@ rules:
     # 告警配置（新增）
 alert:
   dingtalk:
-    webhook: "https://oapi.dingtalk.com/robot/send?access_token=aa9c0e08df5"
-    secret: "SE8489468e9921e"  # 可选，加签密钥
+    webhook: "https://oapi.dingtalk.com/robot/send?access_token=aa904ca6f9399e90b61b05dfb1302bc9f900fdd5df3267d6ebe8e301c0e08df5"
+    secret: "SEC296385e36461a073ae8092a7ac9de05bec0903383672873b7b98489468e9921e"  # 可选，加签密钥
   throttle: 300  # 同一规则5分钟内只告警一次（秒）
