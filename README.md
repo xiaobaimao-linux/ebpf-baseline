@@ -46,7 +46,6 @@ sudo ./baseline-guard monitor    # Start real-time monitoring
 ![check output](docs/ebpf-check-security.png)
 ![monitor alert](docs/ebpf-monitor-security.png)
 
-&gt; Place your screenshots in `docs/` directory.
 
 ### Use Cases
 
@@ -109,7 +108,6 @@ sudo ./baseline-guard monitor    # 启动实时监控
 ![核查输出](docs/ebpf-check-security.png)
 ![监控告警](docs/ebpf-monitor-security.png)
 
-&gt; 请将实际运行截图放在 `docs/` 目录下。
 
 ### 适用场景
 
