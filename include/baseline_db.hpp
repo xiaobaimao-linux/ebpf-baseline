@@ -10,7 +10,7 @@ struct BaselineRecord {
     std::string hash;           // sha256
     std::string permission;     // 如 "0644"
     std::string owner;          // uid或用户名
-    std::string group;          // gid或组名
+    std::string grp;          // gid或组名
     std::string recorded_at;    // ISO 8601时间
 };
 
@@ -38,7 +38,7 @@ public:
     void SaveBaseline(const BaselineRecord& record) {
         const char* sql = R"(
             INSERT OR REPLACE INTO baselines 
-            (file_path, hash, permission, owner, group, recorded_at) 
+            (file_path, hash, permission, owner, grp, recorded_at) 
             VALUES (?, ?, ?, ?, ?, ?);
         )";
 
@@ -49,7 +49,7 @@ public:
         sqlite3_bind_text(stmt, 2, record.hash.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 3, record.permission.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 4, record.owner.c_str(), -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 5, record.group.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 5, record.grp.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 6, record.recorded_at.c_str(), -1, SQLITE_STATIC);
 
         if (sqlite3_step(stmt) != SQLITE_DONE) {
@@ -71,7 +71,7 @@ public:
             record.hash      = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
             record.permission= reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
             record.owner     = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-            record.group     = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+            record.grp     = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
             record.recorded_at=reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
         }
 
@@ -92,7 +92,7 @@ public:
             r.hash       = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
             r.permission = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
             r.owner      = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-            r.group      = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+            r.grp      = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
             r.recorded_at= reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
             results.push_back(r);
         }
@@ -111,7 +111,7 @@ private:
                 hash        TEXT,
                 permission  TEXT,
                 owner       TEXT,
-                group_name  TEXT,
+                grp  TEXT,
                 recorded_at TEXT
             );
         )";

@@ -57,7 +57,7 @@ int do_check(const Config& config, BaselineDB& db) {
         record.permission = mode_to_string(actual_mode);
         record.hash = actual_hash.empty() ? compute_sha256(const_cast<string&>(target_path)) : actual_hash;
         record.owner = std::to_string(st.st_uid);
-        record.group = std::to_string(st.st_gid);
+        record.grp = std::to_string(st.st_gid);
 
         auto now = std::chrono::system_clock::now();
         auto time_t_now = std::chrono::system_clock::to_time_t(now);
