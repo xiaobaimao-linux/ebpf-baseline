@@ -3,40 +3,40 @@
 #include "config.hpp"
 #include "monitor.hpp"
 #include "utils.hpp"
+#include "commonfun.hpp"
+#include "logger.h"
+#include "baseline_db.hpp"
 
 #include "spdlog/spdlog.h"
 #include <getopt.h>
+#include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
 
 // 长选项定义
-static struct option long_options[] = {{"config", required_argument, 0, 'c'},
-                                       {"help", no_argument, 0, 'h'},
-                                       {"check", no_argument, 0, 'C'},   // 返回 'C'
-                                       {"monitor", no_argument, 0, 'm'}, // 返回 'm'
-                                       {0, 0, 0, 0}};
+static struct option long_options[] = { {"config", required_argument, 0, 'c'},
+                                        {"help", no_argument, 0, 'h'},
+                                        {"check", no_argument, 0, 'C'},
+                                        {"monitor", no_argument, 0, 'm'},
+                                        {0, 0, 0, 0} };
 
+static volatile bool g_reload = false;
 
-
-// 辅助函数：判断字符串是否以指定后缀结尾
-static bool ends_with(const string& str, const string& suffix) {
-    if (suffix.size() > str.size()) return false;
-    return equal(suffix.rbegin(), suffix.rend(), str.rbegin());
+void sighup_handler(int) {
+    g_reload = true;
 }
 
-
-int main(int argc, char *argv[]) {
-
+int main(int argc, char* argv[]) {
     // 设置全局日志级别（默认是 info，低于它的 debug/trace 不会输出）
     spdlog::set_level(spdlog::level::debug);
 
-    // // 不同级别日志
-    // spdlog::trace("trace 信息");
-    // spdlog::debug("调试信息: x={}", 42);
-    // spdlog::info("欢迎使用 spdlog!");
-    // spdlog::warn("警告信息");
-    // spdlog::error("错误信息: {}", "文件不存在");
-    // spdlog::critical("致命错误!");
+// 1. 初始化日志
+    Logger::init("/var/log/baseline-guard");
+
+    spdlog::info("[service_start] baseline-guard starting, pid={}", getpid());
+
+    // 2. 初始化数据库
+    BaselineDB db;
 
     std::string config_path;
     std::string cmd;
@@ -93,11 +93,16 @@ int main(int argc, char *argv[]) {
     }
 
     vector<Rule> rules;
-    if (ends_with(config_path, ".yaml") || ends_with(config_path, ".yml")) {
-        rules = parseYamlFile(config_path);
-    } else {
-        rules = parseIniFile(config_path);
+    if (!ends_with(config_path, ".yaml") && !ends_with(config_path, ".yml")) {
+        spdlog::error("[config_error] only yaml/yml config is supported now: {}", config_path);
+        return 1;
     }
+
+    rules = parseYamlFile(config_path);
+
+    spdlog::info("[rules_loaded] config={}, format=yaml, rules={}",
+                 config_path,
+                 rules.size());
 
     // 打印结果
     printRules(rules);
@@ -108,13 +113,36 @@ int main(int argc, char *argv[]) {
     compute_inodes(config);
 
     if (cmd == "check") {
-        return do_check(config);
+        spdlog::info("[service_start] check mode started");
+        int ret = do_check(config, db);
+        spdlog::info("[service_stop] check mode finished, exit_code={}", ret);
+        return ret;
     } else if (cmd == "monitor") {
-        return do_monitor(config);
+        // 注册 SIGHUP 用于配置重载
+        signal(SIGHUP, sighup_handler);
+        spdlog::info("[service_start] monitor mode started");
+
+        int ret = 0;
+        while (true) {
+            ret = do_monitor(config);
+            if (!g_reload) {
+                break;
+            }
+            g_reload = false;
+            spdlog::info("[rules_reload] SIGHUP received, reloading config from {}", config_path);
+
+            vector<Rule> new_rules;
+            new_rules = parseYamlFile(config_path);
+            config.rules = new_rules;
+            compute_inodes(config);
+
+            spdlog::info("[rules_reload] config reloaded, rules={}", config.rules.size());
+        }
+
+        spdlog::info("[service_stop] monitor mode stopped, exit_code={}", ret);
+        return ret;
     } else {
         spdlog::error("未知命令: {}", cmd);
         return 1;
     }
-
-    // 加载配置，执行check或monitor
 }

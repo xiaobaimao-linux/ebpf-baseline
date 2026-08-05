@@ -1,0 +1,15 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "C_Cpp.autocomplete": "disabled",
+  "C_Cpp.errorSquiggles": "disabled",
+  "C_Cpp.dimInactiveRegions": false,
+  "C_Cpp.workspaceParsingPriority": "low",
+  "files.associations": {
+    "*.cpp": "cpp",
+    "*.h": "cpp"
+  },
+  "chat.tools.terminal.autoApprove": {
+    "make": true,
+    "./test_config": true
+  }
+}

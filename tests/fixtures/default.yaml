@@ -1,0 +1,71 @@
+# 监控程序配置文件
+# 工作模式: check (静态检查) / monitor (实时监控)
+
+rules:
+
+  # --- 示例规则 1: 文件权限检查 (用于 check 模式) ---
+  - id: "SYS-PERM-001"
+    name: "系统关键文件权限检查 - /etc/passwd"
+    severity: "critical"
+    check:
+      type: "file_permission"   # 检查类型: 文件权限
+      path: "/etc/passwd"       # 目标文件路径
+      mode: "0644"              # 期望的权限模式 (八进制)
+      on_failure: "report_only"
+
+  # --- 示例规则 2: 文件哈希检查 (用于 check 模式) ---
+  - id: "SYS-HASH-001"
+    name: "系统二进制文件完整性检查 - /usr/bin/sshd"
+    severity: "high"
+    check:
+      type:                # 检查类型: 文件哈希\文件权限
+        - "file_permission"
+        - "file_hash"
+      path: "/usr/bin/sshd"     # 目标文件路径
+      hash: "sha256:a1b2c3d4e5f6..." # 期望的哈希值 (格式: algorithm:value)
+      mode: "0644"              # 期望的权限模式 (八进制)
+      on_failure: "report_only"
+
+  # --- 示例规则 3: 实时监控 (用于 monitor 模式) ---
+  - id: "SYS-MONITOR-abc.txt"
+    name: "监控敏感文件读取 - ~/abc.txt.12345678901234567890"
+    severity: "critical"
+    monitor:
+      path: "/home/sf/abc.txt.12345678901234567890"       # 要监控的文件路径
+      events:                   # 需要监控的事件列表
+        - "read"                # 读取事件
+        - "write"               # 写入事件
+      action: "block"           # 事件触发时的动作: alert / block
+
+  # --- 示例规则 4: 同时包含 check 和 monitor 的规则 ---
+  - id: "SYS-COMBO-001"
+    name: "综合监控 - 用户配置文件 /home/sf/combo.txt.12345678901234567890"
+    severity: "medium"
+    check:
+      type:
+        - "file_permission"
+        - "file_hash"
+      path: "/home/sf/combo.txt.12345678901234567890"
+      mode: "0644"
+      hash: "d9cd8155764c3543f10fad8a480d743137466f8d55213c8eaefcd12f06d43a80"
+    monitor:
+      path: "/home/sf/combo.txt.12345678901234567890"
+      events:
+        - "write"
+      action: "block"
+
+  # --- 空模板，供您填充 ---
+  # - id: ""
+    # name: ""
+    # severity: ""               # low / medium / high / critical
+    # check:                    # 用于静态检查 (可选)
+    #   type: ""                # file_permission / file_hash
+    #   path: ""
+    #   mode: ""                # 仅 file_permission 时需要
+    #   hash: ""                # 仅 file_hash 时需要 (格式: algorithm:value)
+    #   on_failure: ""          # report_only / alert / block
+    # monitor:                  # 用于实时监控 (可选)
+    #   path: ""
+    #   events:                 # read / write (可同时存在)
+    #     - ""
+    #   action: ""              # alert / block

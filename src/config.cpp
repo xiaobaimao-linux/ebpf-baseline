@@ -1,16 +1,30 @@
 #include <cstdint>
-#include <fstream>
 #include <iostream>
-#include <regex>
 #include <spdlog/spdlog.h>
 #include <string>
-#include <unordered_map>
 #include <vector>
 #include <yaml-cpp/yaml.h>
 
 #include "config.hpp"
 
 using namespace std;
+
+static vector<string> parseYamlTypes(const YAML::Node &node) {
+    vector<string> out;
+    if (!node) {
+        return out;
+    }
+    if (node.IsSequence()) {
+        for (const auto &item : node) {
+            if (item && item.IsScalar()) {
+                out.push_back(item.as<string>());
+            }
+        }
+    } else if (node.IsScalar()) {
+        out.push_back(node.as<string>());
+    }
+    return out;
+}
 
 // 将字符串转为 Action 枚举
 Action stringToAction(const string &str) {
@@ -48,139 +62,20 @@ string actionToString(Action action) {
 void compute_inodes(Config &config) {
     for (auto &rule : config.rules) {
         struct stat st;
-        if (stat(rule.path.c_str(), &st) == 0) {
+        string target_path = rule.check_path;
+        if (target_path.empty()) {
+            target_path = rule.monitor_path;
+        }
+        if (target_path.empty()) {
+            rule.ino = 0;
+            continue;
+        }
+        if (stat(target_path.c_str(), &st) == 0) {
             rule.ino = st.st_ino;
         } else {
             rule.ino = 0; // 文件不存在
         }
     }
-}
-
-// 解析单个 section 的键值对
-unordered_map<string, string> parseSection(const string &content) {
-    unordered_map<string, string> kv;
-    istringstream stream(content);
-    string line;
-
-    while (getline(stream, line)) {
-        // 去除前后空白
-        line.erase(0, line.find_first_not_of(" \t\r\n"));
-        line.erase(line.find_last_not_of(" \t\r\n") + 1);
-
-        // 跳过空行和注释
-        if (line.empty() || line[0] == '#' || line[0] == ';')
-            continue;
-
-        size_t eq_pos = line.find('=');
-        if (eq_pos == string::npos)
-            continue;
-
-        string key = line.substr(0, eq_pos);
-        string value = line.substr(eq_pos + 1);
-
-        // 去除 key/value 的空白
-        key.erase(0, key.find_first_not_of(" \t"));
-        key.erase(key.find_last_not_of(" \t") + 1);
-        value.erase(0, value.find_first_not_of(" \t"));
-        value.erase(value.find_last_not_of(" \t") + 1);
-
-        kv[key] = value;
-    }
-
-    return kv;
-}
-
-// 解析 INI 文件内容，返回 Rule 列表
-vector<Rule> parseIniFile(const string &filename) {
-    vector<Rule> rules;
-    ifstream file(filename);
-
-    if (!file.is_open()) {
-        spdlog::error("无法打开文件: {}", filename);
-        return rules;
-    }
-
-    string line;
-    string currentSection;
-    string sectionContent;
-    regex sectionRegex(R"(\[([^\]]+)\])");
-
-    while (getline(file, line)) {
-        // 去除行尾回车
-        if (!line.empty() && line.back() == '\r')
-            line.pop_back();
-
-        smatch match;
-        if (regex_match(line, match, sectionRegex)) {
-            // 处理上一个 section
-            if (!currentSection.empty() && !sectionContent.empty()) {
-                auto kv = parseSection(sectionContent);
-
-                Rule rule;
-                rule.name = currentSection;
-
-                if (kv.count("path"))
-                    rule.path = kv["path"];
-                if (kv.count("mode")) {
-                    try {
-                        // 解析八进制权限（如 600）
-                        rule.mode = stoul(kv["mode"], nullptr, 8);
-                    } catch (...) {
-                        spdlog::warn("无法解析 mode 值: {} (section: {})", kv["mode"],
-                                     currentSection);
-                    }
-                }
-                if (kv.count("hash")) {
-                    rule.hash = kv["hash"];
-                    rule.has_hash = true;
-                }
-                if (kv.count("action")) {
-                    rule.action = stringToAction(kv["action"]);
-                }
-
-                rules.push_back(rule);
-                spdlog::debug("解析规则: name={}, path={}, inode={}, mode={:o}, hash={}, action={}",
-                              rule.name, rule.path, rule.ino, rule.mode,
-                              rule.has_hash ? rule.hash : "(无)", actionToString(rule.action));
-            }
-
-            // 开始新的 section
-            currentSection = match[1].str();
-            sectionContent.clear();
-        } else {
-            sectionContent += line + "\n";
-        }
-    }
-
-    // 处理最后一个 section
-    if (!currentSection.empty() && !sectionContent.empty()) {
-        auto kv = parseSection(sectionContent);
-
-        Rule rule;
-        rule.name = currentSection;
-
-        if (kv.count("path"))
-            rule.path = kv["path"];
-        if (kv.count("mode")) {
-            try {
-                rule.mode = stoul(kv["mode"], nullptr, 8);
-            } catch (...) {
-                spdlog::warn("无法解析 mode 值: {} (section: {})", kv["mode"], currentSection);
-            }
-        }
-        if (kv.count("hash")) {
-            rule.hash = kv["hash"];
-            rule.has_hash = true;
-        }
-        if (kv.count("action")) {
-            rule.action = stringToAction(kv["action"]);
-        }
-
-        rules.push_back(rule);
-    }
-
-    file.close();
-    return rules;
 }
 
 // 解析 YAML 文件，返回 Rule 列表
@@ -197,65 +92,85 @@ vector<Rule> parseYamlFile(const string &filename) {
         const YAML::Node &rulesNode = root["rules"];
         for (const auto &item : rulesNode) {
             Rule rule;
-            rule.action = Action::LOG; // YAML 中无 action 字段，默认 LOG
 
-            // 组合 id + name 作为 rule.name
-            string id = item["id"] ? item["id"].as<string>() : "";
+            rule.id = item["id"] ? item["id"].as<string>() : "";
+            rule.severity = item["severity"] ? item["severity"].as<string>() : "";
             string name = item["name"] ? item["name"].as<string>() : "";
-            if (!id.empty() && !name.empty()) {
-                rule.name = id + ": " + name;
+            if (!rule.id.empty() && !name.empty()) {
+                rule.name = rule.id + ": " + name;
             } else if (!name.empty()) {
                 rule.name = name;
-            } else if (!id.empty()) {
-                rule.name = id;
+            } else if (!rule.id.empty()) {
+                rule.name = rule.id;
             } else {
                 rule.name = "(unnamed)";
             }
 
-            // severity 暂不映射到 Rule 结构，可用于后续扩展
-
-            // 解析 check 节点
-            if (!item["check"]) {
-                spdlog::warn("规则 {} 缺少 'check' 节点，已跳过", rule.name);
-                continue;
-            }
-
-            const YAML::Node &check = item["check"];
-            string check_type = check["type"] ? check["type"].as<string>() : "";
-
-            if (check["action"]) {
-                Action action = stringToAction(check["action"].as<string>());
-                rule.action = action;
-            }
-
-            if (check_type == "file_permission") {
+            if (item["check"]) {
+                rule.has_check = true;
+                const YAML::Node &check = item["check"];
+                rule.check_types = parseYamlTypes(check["type"]);
                 if (check["path"]) {
-                    rule.path = check["path"].as<string>();
+                    rule.check_path = check["path"].as<string>();
                 }
                 if (check["mode"]) {
                     string mode = check["mode"].as<string>();
                     try {
-                        rule.mode = stoul(mode, nullptr, 8);
+                        rule.check_mode = stoul(mode, nullptr, 8);
                     } catch (...) {
                         spdlog::warn("无法解析 mode 值: {} (rule: {})", mode, rule.name);
+                        rule.check_mode = 0;
                     }
                 }
-            } else if (check_type == "file_hash") {
-                if (check["path"]) {
-                    rule.path = check["path"].as<string>();
-                }
                 if (check["hash"]) {
-                    rule.hash = check["hash"].as<string>();
-                    rule.has_hash = true;
+                    rule.check_hash = check["hash"].as<string>();
+                    rule.has_check_hash = true;
                 }
-            } else {
-                spdlog::warn("未知的 check type: {} (rule: {})", check_type, rule.name);
+                if (check["on_failure"]) {
+                    rule.check_on_failure = check["on_failure"].as<string>();
+                }
+            }
+
+            if (item["monitor"]) {
+                rule.has_monitor = true;
+                const YAML::Node &monitor = item["monitor"];
+                if (monitor["path"]) {
+                    rule.monitor_path = monitor["path"].as<string>();
+                }
+                if (monitor["action"]) {
+                    rule.monitor_action = stringToAction(monitor["action"].as<string>());
+                }
+                if (monitor["events"]) {
+                    const auto &eventsNode = monitor["events"];
+                    if (eventsNode.IsSequence()) {
+                        for (const auto &ev : eventsNode) {
+                            string evt = ev.as<string>();
+                            rule.monitor_events.push_back(evt);
+                            if (evt == "read") {
+                                rule.monitor_read = true;
+                            }
+                            if (evt == "write") {
+                                rule.monitor_write = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!rule.has_check && !rule.has_monitor) {
+                spdlog::warn("规则 {} 缺少 'check' 或 'monitor' 节点，已跳过", rule.name);
+                continue;
             }
 
             rules.push_back(rule);
-            spdlog::debug("解析 YAML 规则: name={}, path={}, mode={:o}, hash={}, action={}",
-                          rule.name, rule.path, rule.mode, rule.has_hash ? rule.hash : "(无)",
-                          actionToString(rule.action));
+            spdlog::debug("解析 YAML 规则: name={}, check_path={}, check_mode={:o}, check_hash={}, check_on_failure={}, monitor_path={}, monitor_events={}",
+                          rule.name,
+                          rule.check_path.empty() ? "(无)" : rule.check_path,
+                          rule.check_mode,
+                          rule.has_check_hash ? rule.check_hash : "(无)",
+                          rule.check_on_failure.empty() ? "(无)" : rule.check_on_failure,
+                          rule.monitor_path.empty() ? "(无)" : rule.monitor_path,
+                          rule.monitor_events.empty() ? "(无)" : "set");
         }
     } catch (const YAML::Exception &e) {
         spdlog::error("YAML 解析错误: {}", e.what());
@@ -269,13 +184,20 @@ void printRules(const vector<Rule> &rules) {
     spdlog::info("共解析 {} 条规则:", rules.size());
     for (const auto &rule : rules) {
         spdlog::info("  [{}]", rule.name);
-        spdlog::info("    path:   {}", rule.path);
-        spdlog::info("    mode:   {:o}", rule.mode);
-        if (rule.has_hash) {
-            spdlog::info("    hash:   {}", rule.hash);
-        } else {
-            spdlog::info("    hash:   (未设置)");
+        if (rule.has_check) {
+            spdlog::info("    check_path:   {}", rule.check_path);
+            spdlog::info("    check_mode:   {:o}", rule.check_mode);
+            if (rule.has_check_hash) {
+                spdlog::info("    check_hash:   {}", rule.check_hash);
+            } else {
+                spdlog::info("    check_hash:   (未设置)");
+            }
+            spdlog::info("    check_on_failure: {}", rule.check_on_failure.empty() ? "report_only" : rule.check_on_failure);
         }
-        spdlog::info("    action: {}", actionToString(rule.action));
+        if (rule.has_monitor) {
+            spdlog::info("    monitor_path:   {}", rule.monitor_path);
+            spdlog::info("    monitor_events: {}", rule.monitor_events.empty() ? "(无)" : "set");
+            spdlog::info("    monitor_action: {}", actionToString(rule.monitor_action));
+        }
     }
 }

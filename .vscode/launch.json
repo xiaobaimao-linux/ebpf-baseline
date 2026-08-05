@@ -1,46 +1,118 @@
 {
     "version": "0.2.0",
     "configurations": [
-        // {
-        //     "name": "C++ Debug",
-        //     "type": "cppdbg",
-        //     "request": "launch",
-        //     "program": "${workspaceFolder}/baseline-guard",
-        //     "args": [],
-        //     "stopAtEntry": true,
-        //     "cwd": "${workspaceFolder}",
-        //     "environment": [],
-        //     "externalConsole": false,
-        //     "MIMode": "gdb",
-        //     "miDebuggerPath": "/usr/bin/gdb",
-        //     "setupCommands": [
-        //         {
-        //             "description": "Enable pretty-printing",
-        //             "text": "-enable-pretty-printing",
-        //             "ignoreFailures": true
-        //         },
-        //         {
-        //             "description": "Disable debuginfod",
-        //             "text": "set debuginfod enabled off",
-        //             "ignoreFailures": true
-        //         }
-        //     ],
-        //     "preLaunchTask": "build-A"
-        // }
         {
-            "name": "gdb 调试 a (Native Debug)",
-            "type": "gdb",
+            "name": "Debug baseline-guard (monitor)",
+            "type": "cppdbg",
             "request": "launch",
-            "target": "${workspaceFolder}/baseline-guard",
-            "arguments": "-c  baselines/default.yaml --monitor",
+            "program": "${workspaceFolder}/baseline-guard",
+            "args": [
+                "-c",
+                "${workspaceFolder}/tests/fixtures/default.yaml",
+                "--monitor"
+            ],
+            "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
-            "valuesFormatting": "prettyPrinters",
-            "gdbpath": "/usr/bin/gdb",
-            "autorun": [
-                "set pagination off",
-                "set debuginfod enabled off"
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${workspaceFolder}/sudo-gdb.sh",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Disable debuginfod to speed up startup",
+                    "text": "set debuginfod enabled off",
+                    "ignoreFailures": true
+                }
             ],
             "preLaunchTask": "buildA"
+        },
+        {
+            "name": "Debug test_config (fast)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/tests/test_config",
+            "args": [],
+            // "stopAtEntry": true,
+            "cwd": "${workspaceFolder}/tests",
+            "environment": [
+                {
+                    "name": "DEBUGINFOD_URLS",
+                    "value": ""
+                }
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            // "miDebuggerArgs": "-ex \"set debuginfod enabled off\" -ex \"set auto-solib-add 0\" -ex \"set pagination off\"",
+            "miDebuggerArgs": "",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "setupCommands": [
+                // {
+                //     "description": "Disable debuginfod",
+                //     "text": "set debuginfod enabled off",
+                //     "ignoreFailures": true
+                // },
+                {
+                    "description": "Disable auto-loading scripts",
+                    "text": "set auto-load off",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Disable shared library auto-add",
+                    "text": "set auto-solib-add 0",
+                    "ignoreFailures": true
+                },
+                // {
+                //     "description": "Disable startup shell",
+                //     "text": "set startup-with-shell off",
+                //     "ignoreFailures": true
+                // }
+                // {
+                //     "description": "Load local gdbinit",
+                //     "text": "source ${workspaceFolder}/.gdbinit",
+                //     "ignoreFailures": false
+                // }
+            ],
+            // "symbolLoadInfo": {
+            //     "loadAll": false,
+            //     "exceptionList": ""
+            // },
+            "logging": {
+                "engineLogging": true,
+                "trace": true,
+                "moduleLoad": true
+            },
+            "preLaunchTask": "Build test_config"
+        },
+        {
+            "name": "Debug test_utils",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/tests/test_utils",
+            "args": [],
+            "stopAtEntry": true,
+            "cwd": "${workspaceFolder}/tests",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "setupCommands": [
+                // {
+                //     "description": "Enable pretty-printing for gdb",
+                //     "text": "-enable-pretty-printing",
+                //     "ignoreFailures": true
+                // },
+                // {
+                //     "description": "Disable debuginfod to speed up startup",
+                //     "text": "set debuginfod enabled off",
+                //     "ignoreFailures": true
+                // }
+            ],
+            "preLaunchTask": "Build test_utils"
         }
     ]
 }

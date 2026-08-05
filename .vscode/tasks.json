@@ -6,11 +6,58 @@
             "type": "shell",
             "command": "make",
             "args": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
-            "problemMatcher": ["$gcc"]
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "Build test_config",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "test_config"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/tests"
+            },
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "Build test_utils",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "test_utils"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/tests"
+            },
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
         }
     ]
 }

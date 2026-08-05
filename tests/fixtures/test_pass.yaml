@@ -1,0 +1,28 @@
+rules:
+  - id: SYS-001
+    name: "/etc/passwd 权限监控"
+    severity: critical
+    check:
+      type: file_permission
+      path: /etc/passwd
+      mode: "0644"
+      on_failure: report_only
+
+  - id: SYS-002
+    name: "/etc/shadow 权限监控"
+    severity: critical
+    check:
+      type: file_permission
+      path: /etc/shadow
+      mode: "0000"
+      on_failure: report_only
+  
+  - id: SYS-0023
+    name: "/home/sf/abc.txt 权限监控"
+    severity: high
+    check:
+      type: file_permission
+      path: /home/sf/abc.txt12345678901234567890
+      mode: "0600"          # 预期权限
+      hash: "sha256:3bdd4610bea1683cadfbe0dfc9b7113363b9840a725daf97feda994154cc816a"
+      on_failure: report_only

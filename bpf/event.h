@@ -8,6 +8,14 @@
 #define ACTION_BLOCK 3
 #define ACTION_KILL 4
 
+#define EVENT_READ 1
+#define EVENT_WRITE 2
+
+struct monitor_rule {
+    unsigned char action;
+    unsigned char events_mask;
+};
+
 struct event {
     unsigned int pid;
     char comm[16];

@@ -4,7 +4,6 @@
 
 #include <string>
 #include <vector>
-#include <unordered_map>
 
 #include "baseline.hpp"
 
@@ -17,12 +16,6 @@ Action stringToAction(const string& str);
 
 // 将 Action 枚举转为字符串
 string actionToString(Action action);
-
-// 解析单个 section 的键值对
-unordered_map<string, string> parseSection(const string& content);
-
-// 解析整个 INI 文件，返回 Rule 列表
-vector<Rule> parseIniFile(const string& filename);
 
 // 解析 YAML 文件，返回 Rule 列表
 vector<Rule> parseYamlFile(const string& filename);
