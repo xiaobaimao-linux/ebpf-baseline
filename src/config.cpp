@@ -78,15 +78,37 @@ void compute_inodes(Config &config) {
     }
 }
 
-// 解析 YAML 文件，返回 Rule 列表
-vector<Rule> parseYamlFile(const string &filename) {
+// 解析 YAML 文件，返回完整配置对象
+Config parseYamlFile(const string &filename) {
+    Config config;
     vector<Rule> rules;
 
     try {
         YAML::Node root = YAML::LoadFile(filename);
+
+        if (root["alert"]) {
+            const YAML::Node &alertNode = root["alert"];
+            if (alertNode["dingtalk"]) {
+                const YAML::Node &dingtalkNode = alertNode["dingtalk"];
+                if (dingtalkNode["webhook"]) {
+                    config.alert.dingtalk_webhook = dingtalkNode["webhook"].as<string>();
+                }
+                if (dingtalkNode["secret"]) {
+                    config.alert.dingtalk_secret = dingtalkNode["secret"].as<string>();
+                }
+            }
+            if (alertNode["throttle"]) {
+                try {
+                    config.alert.throttle_seconds = alertNode["throttle"].as<int>();
+                } catch (const YAML::Exception &e) {
+                    spdlog::warn("无法解析 alert.throttle 值: {}", e.what());
+                }
+            }
+        }
+
         if (!root["rules"]) {
             spdlog::error("YAML 文件缺少 'rules' 根节点: {}", filename);
-            return rules;
+            return config;
         }
 
         const YAML::Node &rulesNode = root["rules"];
@@ -172,11 +194,13 @@ vector<Rule> parseYamlFile(const string &filename) {
                           rule.monitor_path.empty() ? "(无)" : rule.monitor_path,
                           rule.monitor_events.empty() ? "(无)" : "set");
         }
+
+        config.rules = rules;
     } catch (const YAML::Exception &e) {
         spdlog::error("YAML 解析错误: {}", e.what());
     }
 
-    return rules;
+    return config;
 }
 
 // 打印规则列表

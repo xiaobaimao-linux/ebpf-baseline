@@ -7,7 +7,7 @@ BPF_CFLAGS = -target bpf -D__TARGET_ARCH_x86_64 \
              -I/usr/include/x86_64-linux-gnu \
              -I/usr/include/bpf -g -O2
 
-LDFLAGS = -lbpf -lssl -lcrypto -lfmt -lyaml-cpp  -lsqlite3
+LDFLAGS = -lbpf -lssl -lcrypto -lfmt -lyaml-cpp -lsqlite3 -lcurl
 
 TARGET = baseline-guard
 
@@ -16,7 +16,7 @@ BPF_OBJ = bpf/lsm_file.bpf.o
 BPF_SKEL = bpf/lsm_file.skel.h
 
 # 用户态源文件
-MAIN_SRCS = src/main.cpp src/config.cpp src/check.cpp src/utils.cpp src/commonfun.cpp 
+MAIN_SRCS = src/main.cpp src/config.cpp src/check.cpp src/utils.cpp src/commonfun.cpp src/alert_manager.cpp
 MONITOR_SRC = src/monitor.cpp
 
 OBJS = $(MAIN_SRCS:.cpp=.o) $(MONITOR_SRC:.cpp=.o)
@@ -46,6 +46,9 @@ src/utils.o: src/utils.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 src/commonfun.o: src/commonfun.cpp
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+src/alert_manager.o: src/alert_manager.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # 依赖 skel.h 的源文件

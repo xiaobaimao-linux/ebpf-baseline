@@ -2,7 +2,7 @@
 #include "../bpf/event.h"
 #include "utils.hpp"
 #include "config.hpp"
-
+#include "commonfun.hpp"
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -27,11 +27,16 @@ void signal_handler(int sig) {
 }
 
 // 全局映射（或封装到类）
+std::unordered_map<unsigned long, Rule> g_inode_to_rule;
 std::unordered_map<unsigned long, std::string> g_inode_to_path;
 std::unordered_map<unsigned long, std::string> g_inode_to_hash;
 
 // 初始化映射
 void init_inode_maps(const Config &config) {
+    g_inode_to_rule.clear();
+    g_inode_to_path.clear();
+    g_inode_to_hash.clear();
+
     for (const auto &rule : config.rules) {
         if (!rule.has_monitor)
             continue;
@@ -39,6 +44,7 @@ void init_inode_maps(const Config &config) {
             continue;
         if (rule.ino == 0)
             continue;
+        g_inode_to_rule[rule.ino] = rule;
         g_inode_to_path[rule.ino] = rule.monitor_path;
         if (!rule.check_hash.empty()) {
             g_inode_to_hash[rule.ino] = rule.check_hash;
@@ -46,8 +52,48 @@ void init_inode_maps(const Config &config) {
     }
 }
 
+
+void on_violation_detected(const Rule& rule, 
+                           const std::string& file_path,
+                           const std::string& actual_mode,
+                           const std::string& proc_name,
+                           int pid,
+                           AlertManager& alert_mgr) 
+{
+    // 1. 写日志（你已完成）
+    spdlog::warn("VIOLATION: {} mode {} -> {} by {}/{}",
+                 file_path, mode_to_string(rule.check_mode), actual_mode, proc_name, pid);
+
+    // 2. 发钉钉（新增）
+    if (alert_mgr.IsEnabled()) {
+        AlertEvent evt;
+        evt.rule_id = rule.id;
+        evt.rule_name = rule.name;
+        evt.severity = rule.severity;
+        evt.file_path = file_path;
+        evt.expected = mode_to_string(rule.check_mode);
+        evt.actual = actual_mode;
+        evt.process_name = proc_name;
+        evt.pid = pid;
+        evt.timestamp = NowString();
+        
+        alert_mgr.SendDingTalk(evt);
+    }
+}
+
+
+
 static int handle_event(void *ctx, void *data, size_t data_sz) {
+    (void)data_sz;
+
     auto *e = static_cast<struct event *>(data);
+    auto *alert_mgr = static_cast<AlertManager *>(ctx);
+
+    auto it_rule = g_inode_to_rule.find(e->ino);
+    if (it_rule == g_inode_to_rule.end()) {
+        return 0;
+    }
+    const Rule &rule = it_rule->second;
 
     auto it_path = g_inode_to_path.find(e->ino);
     if (it_path == g_inode_to_path.end()) {
@@ -55,37 +101,41 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     }
     const std::string &path = it_path->second;
 
+    const std::string actual_event = ((e->mask & EVENT_READ) != 0) ? "read" : "write";
+    if (alert_mgr != nullptr) {
+        on_violation_detected(rule, path, actual_event, e->comm, e->pid, *alert_mgr);
+    }
+
     auto it_hash = g_inode_to_hash.find(e->ino);
     if (it_hash == g_inode_to_hash.end()) {
-
-        
         std::ostringstream oss;
-        oss << "["<< actionToString(static_cast<Action>(e->action)) <<"] File access detected (no hash baseline)\n"
-                  << "  path: " << path << "\n"
-                  << "  pid: " << e->pid << "\n"
-                  << "  comm: " << e->comm << std::endl;
+        oss << "[" << actionToString(static_cast<Action>(e->action)) << "] File access detected (no hash baseline)\n"
+            << "  path: " << path << "\n"
+            << "  pid: " << e->pid << "\n"
+            << "  comm: " << e->comm << std::endl;
         spdlog::warn(oss.str());
-        spdlog::default_logger()->flush(); 
+        spdlog::default_logger()->flush();
         return 0;
     }
+
     const std::string &expected_hash = it_hash->second;
     std::string current_hash = compute_sha256(path);
 
     if (current_hash != expected_hash) {
         std::ostringstream oss;
-        oss << "["<< actionToString(static_cast<Action>(e->action)) <<"] File modified! hash mismatch\n"
-                  << "  path: " << path << "\n"
-                  << "  pid: " << e->pid << "\n"
-                  << "  comm: " << e->comm << "\n"
-                  << "  expected_hash: " << expected_hash << "\n"
-                  << "  current_hash:  " << current_hash << std::endl;
+        oss << "[" << actionToString(static_cast<Action>(e->action)) << "] File modified! hash mismatch\n"
+            << "  path: " << path << "\n"
+            << "  pid: " << e->pid << "\n"
+            << "  comm: " << e->comm << "\n"
+            << "  expected_hash: " << expected_hash << "\n"
+            << "  current_hash:  " << current_hash << std::endl;
         spdlog::warn(oss.str());
     }
 
     return 0;
 }
 
-int do_monitor(const Config &config) {
+int do_monitor(const Config &config, AlertManager &alert_mgr) {
     struct lsm_file_bpf *skel;
     int err;
 
@@ -136,7 +186,7 @@ int do_monitor(const Config &config) {
     spdlog::info("Monitoring started. Press Ctrl+C to stop.");
 
     struct ring_buffer *rb =
-        ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, nullptr, nullptr);
+        ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, &alert_mgr, nullptr);
 
     if (!rb) {
         spdlog::error("[bpf_program_error] Failed to create ring buffer");

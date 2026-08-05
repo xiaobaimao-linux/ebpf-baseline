@@ -1,7 +1,7 @@
 # baseline-guard 测试 Makefile
 
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall -I../include -I../src  -I../bpf -g
+CXXFLAGS = -std=c++17 -Wall -I../include -I../src  -I../bpf -I/usr/include/x86_64-linux-gnu -g
 LDFLAGS_COMMON = -lfmt -lyaml-cpp -lsqlite3 -g
 LDFLAGS_SSL = -lssl -lcrypto -g
 

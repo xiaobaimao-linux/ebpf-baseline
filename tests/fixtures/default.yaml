@@ -69,3 +69,10 @@ rules:
     #   events:                 # read / write (可同时存在)
     #     - ""
     #   action: ""              # alert / block
+
+    # 告警配置（新增）
+alert:
+  dingtalk:
+    webhook: "https://oapi.dingtalk.com/robot/send?access_token=aa9c0e08df5"
+    secret: "SE8489468e9921e"  # 可选，加签密钥
+  throttle: 300  # 同一规则5分钟内只告警一次（秒）

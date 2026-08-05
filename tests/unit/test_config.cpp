@@ -47,19 +47,19 @@ void test_yaml_normal() {
       hash: "sha256:deadbeef"
 )";
     std::string path = write_temp(yaml, ".yaml");
-    auto rules = parseYamlFile(path);
+    Config config = parseYamlFile(path);
     cleanup(path);
 
-    assert(rules.size() == 2);
-    assert(rules[0].name == "SYS-COMBO-001: 综合监控 - 用户配置文件 /home/sf/combo.txt.12345678901234567890");
-    assert(rules[0].has_check == true);
-    assert(rules[0].check_path == "/home/sf/combo.txt.12345678901234567890");
-    assert(rules[0].check_mode == 0420);
-    assert(rules[0].has_check_hash == true);
-    assert(rules[0].check_on_failure == "report_only");
-    assert(rules[0].monitor_path == "/home/sf/combo.txt.12345678901234567890");
-    assert(rules[0].monitor_action == Action::BLOCK);
-    assert(rules[1].has_check_hash == true);
+    assert(config.rules.size() == 2);
+    assert(config.rules[0].name == "SYS-COMBO-001: 综合监控 - 用户配置文件 /home/sf/combo.txt.12345678901234567890");
+    assert(config.rules[0].has_check == true);
+    assert(config.rules[0].check_path == "/home/sf/combo.txt.12345678901234567890");
+    assert(config.rules[0].check_mode == 0420);
+    assert(config.rules[0].has_check_hash == true);
+    assert(config.rules[0].check_on_failure == "report_only");
+    assert(config.rules[0].monitor_path == "/home/sf/combo.txt.12345678901234567890");
+    assert(config.rules[0].monitor_action == Action::BLOCK);
+    assert(config.rules[1].has_check_hash == true);
     printf("  [PASS] CFG-005: YAML正常解析\n");
 }
 
@@ -67,9 +67,9 @@ void test_yaml_normal() {
 void test_yaml_no_rules() {
     std::string yaml = "{}";
     std::string path = write_temp(yaml, ".yaml");
-    auto rules = parseYamlFile(path);
+    Config config = parseYamlFile(path);
     cleanup(path);
-    assert(rules.empty());
+    assert(config.rules.empty());
     printf("  [PASS] CFG-006: YAML缺少rules根节点\n");
 }
 
@@ -100,26 +100,26 @@ void test_yaml_monitor_and_combo() {
     action: alert
 )";
     std::string path = write_temp(yaml, ".yaml");
-    auto rules = parseYamlFile(path);
+    Config config = parseYamlFile(path);
     cleanup(path);
 
-    assert(rules.size() == 2);
-    assert(rules[0].has_monitor == true);
-    assert(rules[0].monitor_path == "/home/sf/abc.txt");
-    assert(rules[0].monitor_action == Action::BLOCK);
-    assert(rules[1].has_check == true);
-    assert(rules[1].has_monitor == true);
-    assert(rules[1].check_path == "/etc/passwd");
-    assert(rules[1].monitor_path == "/home/sf/combo.txt");
+    assert(config.rules.size() == 2);
+    assert(config.rules[0].has_monitor == true);
+    assert(config.rules[0].monitor_path == "/home/sf/abc.txt");
+    assert(config.rules[0].monitor_action == Action::BLOCK);
+    assert(config.rules[1].has_check == true);
+    assert(config.rules[1].has_monitor == true);
+    assert(config.rules[1].check_path == "/etc/passwd");
+    assert(config.rules[1].monitor_path == "/home/sf/combo.txt");
     printf("  [PASS] CFG-008: YAML支持纯 monitor 和组合规则\n");
 }
 
 // ====== CFG-009: 空 YAML 文件 ======
 void test_empty_file() {
     std::string path = write_temp("");
-    auto rules = parseYamlFile(path);
+    Config config = parseYamlFile(path);
     cleanup(path);
-    assert(rules.empty());
+    assert(config.rules.empty());
     printf("  [PASS] CFG-009: 空YAML文件\n");
 }
 

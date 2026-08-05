@@ -6,6 +6,7 @@
 #include "commonfun.hpp"
 #include "logger.h"
 #include "baseline_db.hpp"
+#include "alert_manager.hpp"
 
 #include "spdlog/spdlog.h"
 #include <getopt.h>
@@ -92,23 +93,29 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    vector<Rule> rules;
+    Config config;
     if (!ends_with(config_path, ".yaml") && !ends_with(config_path, ".yml")) {
         spdlog::error("[config_error] only yaml/yml config is supported now: {}", config_path);
         return 1;
     }
 
-    rules = parseYamlFile(config_path);
+    config = parseYamlFile(config_path);
 
     spdlog::info("[rules_loaded] config={}, format=yaml, rules={}",
                  config_path,
-                 rules.size());
+                 config.rules.size());
 
     // 打印结果
-    printRules(rules);
+    printRules(config.rules);
 
-    Config config;
-    config.rules = rules;
+    AlertManager alert_mgr;
+    alert_mgr.LoadConfig(config.alert.dingtalk_webhook, config.alert.dingtalk_secret);
+    
+    if (alert_mgr.IsEnabled()) {
+        spdlog::info("DingTalk alert enabled");
+    } else {
+        spdlog::warn("DingTalk alert NOT configured");
+    }
 
     compute_inodes(config);
 
@@ -124,16 +131,14 @@ int main(int argc, char* argv[]) {
 
         int ret = 0;
         while (true) {
-            ret = do_monitor(config);
+            ret = do_monitor(config, alert_mgr);
             if (!g_reload) {
                 break;
             }
             g_reload = false;
             spdlog::info("[rules_reload] SIGHUP received, reloading config from {}", config_path);
 
-            vector<Rule> new_rules;
-            new_rules = parseYamlFile(config_path);
-            config.rules = new_rules;
+            config = parseYamlFile(config_path);
             compute_inodes(config);
 
             spdlog::info("[rules_reload] config reloaded, rules={}", config.rules.size());

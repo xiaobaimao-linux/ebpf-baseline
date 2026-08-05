@@ -38,6 +38,3 @@ struct Rule {
     bool monitor_write = false;
 };
 
-struct Config {
-    std::vector<Rule> rules;
-};
