@@ -33,15 +33,9 @@ extern int bpf_path_d_path(struct path *path, char *buf, int buf_len) __ksym;
 SEC("lsm/file_permission")
 int BPF_PROG(file_permission, struct file *file, int mask) {
 
-    char ignore_comm[] = "baseline-guard";
     char comm[16] = {};
     unsigned long ino;
     char fname[256] = {};
-
-    bpf_get_current_comm(comm, sizeof(comm));
-    if (bpf_strncmp(comm, sizeof(comm), "baseline-guard") == 0) {
-        return 0;
-    }
 
     struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
     if (!dentry)
