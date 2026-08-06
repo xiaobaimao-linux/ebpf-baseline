@@ -260,7 +260,6 @@ baseline-guard 采用 **开源核心 + 企业版授权** 模式。
 
 **联系方式：**
 
-- 微信：<img src="docs/weixin-erweima.png" width="300"/>
 - 邮箱：xiaobaimao-linux@proton.me
 - 知乎：https://www.zhihu.com/people/q1w2e3r4t5y6-86
 
