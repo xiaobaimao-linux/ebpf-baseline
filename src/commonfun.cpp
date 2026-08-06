@@ -16,3 +16,21 @@ bool ends_with(const string& str, const string& suffix) {
     if (suffix.size() > str.size()) return false;
     return equal(suffix.rbegin(), suffix.rend(), str.rbegin());
 }
+
+
+std::string GetHostname() {
+    char buf[256] = {0};
+    if (gethostname(buf, sizeof(buf)) == 0) {
+        return std::string(buf);
+    }
+    
+    // fallback
+    std::ifstream f("/etc/hostname");
+    if (f.is_open()) {
+        std::string name;
+        std::getline(f, name);
+        return name;
+    }
+    
+    return "unknown";
+}

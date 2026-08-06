@@ -1,4 +1,6 @@
 #include "report_generator.hpp"
+#include "commonfun.hpp"
+
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -70,7 +72,7 @@ tr:hover{background:#f6f8fa}
 <body>
 <h1>🔒 baseline-guard 基线核查报告</h1>
 <p>生成时间：)" << GetCurrentTime() << R"(</p>
-<p>主机：)" << EscapeHtml(getenv("HOSTNAME") ? getenv("HOSTNAME") : "unknown") << R"(</p>
+<p>主机：)" << EscapeHtml(GetHostname()) << R"(</p>
 
 <div class="summary">
 <div class="summary-box total"><h2>)" << total << R"(</h2><p>检查项总数</p></div>
