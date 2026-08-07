@@ -58,11 +58,11 @@ static void do_file_check(const Rule& rule, BaselineDB& db, std::vector<CheckRes
     const bool has_hash_check = std::find(rule.check_types.begin(), rule.check_types.end(), "file_hash") != rule.check_types.end();
 
     if (has_permission_check) {
-        if (actual_mode == rule.check_mode) {
+        if (actual_mode == rule.check_expected) {
             log_pass(rule.name, target_path + " mode " + mode_to_string(actual_mode));
         } else {
             log_fail(rule.name, target_path + " mode " + mode_to_string(actual_mode) +
-                     ", 期望 mode " + mode_to_string(rule.check_mode));
+                     ", 期望 mode " + mode_to_string(rule.check_expected));
             rule_failed = true;
         }
     }
@@ -98,7 +98,7 @@ static void do_file_check(const Rule& rule, BaselineDB& db, std::vector<CheckRes
     r.rule_id = rule.id;
     r.rule_name = rule.name;
     r.file_path = rule.check_path;
-    r.expected = mode_to_string(rule.check_mode);
+    r.expected = mode_to_string(rule.check_expected);
     r.actual = mode_to_string(actual_mode);
     r.passed = !rule_failed;
     r.severity = rule.severity;

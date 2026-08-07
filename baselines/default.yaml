@@ -5,7 +5,7 @@ rules:
     check:
       type: file_permission
       path: /etc/passwd
-      mode: "0644"
+      expected: "0644"
       hash: ""              # 可选，留空则不校验哈希
       action: alert
 
@@ -15,7 +15,7 @@ rules:
     check:
       type: file_permission
       path: /etc/shadow
-      mode: "0000"
+      expected: "0000"
       hash: ""
       action: alert
 
@@ -25,6 +25,6 @@ rules:
     check:
       type: file_hash
       path: /home/sf/abc.txt
-      mode: "0600"          # 预期权限
+      expected: "0600"       # 预期权限
       hash: "sha256:c6d9d7e2681731fc109b2db70d8fd6a9e09ef4a5c7308564bf03048cec55c6cf"
       action: alert

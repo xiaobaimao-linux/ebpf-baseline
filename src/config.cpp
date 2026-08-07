@@ -135,13 +135,31 @@ Config parseYamlFile(const string &filename) {
                 if (check["path"]) {
                     rule.check_path = check["path"].as<string>();
                 }
-                if (check["mode"]) {
-                    string mode = check["mode"].as<string>();
-                    try {
-                        rule.check_mode = stoul(mode, nullptr, 8);
-                    } catch (...) {
-                        spdlog::warn("无法解析 mode 值: {} (rule: {})", mode, rule.name);
-                        rule.check_mode = 0;
+                if (check["expected"]) {
+                    // 根据检查类型解析 expected：文件权限为八进制字符串，内核参数为数值
+                    const YAML::Node& expectedNode = check["expected"];
+                    bool is_kernel = false;
+                    for (const auto& t : rule.check_types) {
+                        if (t == "kernel_param") {
+                            is_kernel = true;
+                            break;
+                        }
+                    }
+                    if (is_kernel) {
+                        try {
+                            rule.check_expected_value = expectedNode.as<long long>();
+                        } catch (...) {
+                            spdlog::warn("无法解析 expected 值 (rule: {})", rule.name);
+                            rule.check_expected_value = 0;
+                        }
+                    } else {
+                        string expected = expectedNode.as<string>();
+                        try {
+                            rule.check_expected = stoul(expected, nullptr, 8);
+                        } catch (...) {
+                            spdlog::warn("无法解析 expected 值: {} (rule: {})", expected, rule.name);
+                            rule.check_expected = 0;
+                        }
                     }
                 }
                 if (check["hash"]) {
@@ -153,14 +171,6 @@ Config parseYamlFile(const string &filename) {
                 }
                 if (check["operator"]) {
                     rule.check_operator = check["operator"].as<string>();
-                }
-                if (check["expected"]) {
-                    try {
-                        rule.check_expected_value = check["expected"].as<long long>();
-                    } catch (...) {
-                        spdlog::warn("无法解析 expected 值 (rule: {})", rule.name);
-                        rule.check_expected_value = 0;
-                    }
                 }
                 if (check["on_failure"]) {
                     rule.check_on_failure = check["on_failure"].as<string>();
@@ -199,10 +209,10 @@ Config parseYamlFile(const string &filename) {
             }
 
             rules.push_back(rule);
-            spdlog::debug("解析 YAML 规则: name={}, check_path={}, check_mode={:o}, check_hash={}, check_on_failure={}, monitor_path={}, monitor_events={}",
+            spdlog::debug("解析 YAML 规则: name={}, check_path={}, check_expected={:o}, check_hash={}, check_on_failure={}, monitor_path={}, monitor_events={}",
                           rule.name,
                           rule.check_path.empty() ? "(无)" : rule.check_path,
-                          rule.check_mode,
+                          rule.check_expected,
                           rule.has_check_hash ? rule.check_hash : "(无)",
                           rule.check_on_failure.empty() ? "(无)" : rule.check_on_failure,
                           rule.monitor_path.empty() ? "(无)" : rule.monitor_path,
@@ -227,8 +237,8 @@ void printRules(const vector<Rule> &rules) {
             if (!rule.check_path.empty()) {
                 spdlog::info("    check_path:   {}", rule.check_path);
             }
-            if (rule.check_mode != 0) {
-                spdlog::info("    check_mode:   {:o}", rule.check_mode);
+            if (rule.check_expected != 0) {
+                spdlog::info("    check_expected: {:o}", rule.check_expected);
             }
             if (rule.has_check_hash) {
                 spdlog::info("    check_hash:   {}", rule.check_hash);

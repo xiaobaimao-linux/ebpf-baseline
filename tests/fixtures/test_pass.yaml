@@ -5,7 +5,7 @@ rules:
     check:
       type: file_permission
       path: /etc/passwd
-      mode: "0644"
+      expected: "0644"
       on_failure: report_only
 
   - id: SYS-002
@@ -14,7 +14,7 @@ rules:
     check:
       type: file_permission
       path: /etc/shadow
-      mode: "0000"
+      expected: "0000"
       on_failure: report_only
   
   - id: SYS-0023
@@ -23,6 +23,6 @@ rules:
     check:
       type: file_permission
       path: /home/sf/abc.txt12345678901234567890
-      mode: "0600"          # 预期权限
+      expected: "0600"       # 预期权限
       hash: "sha256:3bdd4610bea1683cadfbe0dfc9b7113363b9840a725daf97feda994154cc816a"
       on_failure: report_only

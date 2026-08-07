@@ -31,7 +31,7 @@ void test_yaml_normal() {
         - "file_permission"
         - "file_hash"
       path: "/home/sf/combo.txt.12345678901234567890"
-      mode: "0420"
+      expected: "0420"
       hash: "d9cd8155764c3543f10fad8a480d743137466f8d55213c8eaefcd12f06d43a80"
       on_failure: "report_only"
     monitor:
@@ -54,7 +54,7 @@ void test_yaml_normal() {
     assert(config.rules[0].name == "SYS-COMBO-001: 综合监控 - 用户配置文件 /home/sf/combo.txt.12345678901234567890");
     assert(config.rules[0].has_check == true);
     assert(config.rules[0].check_path == "/home/sf/combo.txt.12345678901234567890");
-    assert(config.rules[0].check_mode == 0420);
+    assert(config.rules[0].check_expected == 0420);
     assert(config.rules[0].has_check_hash == true);
     assert(config.rules[0].check_on_failure == "report_only");
     assert(config.rules[0].monitor_path == "/home/sf/combo.txt.12345678901234567890");
@@ -91,7 +91,7 @@ void test_yaml_monitor_and_combo() {
   check:
     type: file_permission
     path: /etc/passwd
-    mode: "0644"
+    expected: "0644"
     on_failure: report_only
   monitor:
     path: /home/sf/combo.txt

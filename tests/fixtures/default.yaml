@@ -10,7 +10,7 @@ rules:
     check:
       type: "file_permission"   # 检查类型: 文件权限
       path: "/etc/passwd"       # 目标文件路径
-      mode: "0644"              # 期望的权限模式 (八进制)
+      expected: "0644"         # 期望的权限模式 (八进制)
       on_failure: "report_only"
 
   # --- 示例规则 2: 文件哈希检查 (用于 check 模式) ---
@@ -23,7 +23,7 @@ rules:
         - "file_hash"
       path: "/usr/bin/sshd"     # 目标文件路径
       hash: "sha256:a1b2c3d4e5f6..." # 期望的哈希值 (格式: algorithm:value)
-      mode: "0644"              # 期望的权限模式 (八进制)
+      expected: "0644"         # 期望的权限模式 (八进制)
       on_failure: "report_only"
 
   # --- 示例规则 3: 实时监控 (用于 monitor 模式) ---
@@ -46,7 +46,7 @@ rules:
         - "file_permission"
         - "file_hash"
       path: "/home/sf/combo.txt.12345678901234567890"
-      mode: "0644"
+      expected: "0644"
       hash: "d9cd8155764c3543f10fad8a480d743137466f8d55213c8eaefcd12f06d43a80"
     monitor:
       path: "/home/sf/combo.txt.12345678901234567890"
@@ -71,7 +71,7 @@ rules:
     # check:                    # 用于静态检查 (可选)
     #   type: ""                # file_permission / file_hash
     #   path: ""
-    #   mode: ""                # 仅 file_permission 时需要
+    #   expected: ""            # 仅 file_permission 时需要
     #   hash: ""                # 仅 file_hash 时需要 (格式: algorithm:value)
     #   on_failure: ""          # report_only / alert / block
     # monitor:                  # 用于实时监控 (可选)

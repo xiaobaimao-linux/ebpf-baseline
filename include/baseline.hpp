@@ -25,7 +25,7 @@ struct Rule {
     bool has_check = false;
     std::vector<std::string> check_types;
     std::string check_path;
-    uint32_t check_mode = 0;
+    uint32_t check_expected = 0;
     std::string check_hash;
     std::string check_on_failure = "report_only";
     bool has_check_hash = false;
