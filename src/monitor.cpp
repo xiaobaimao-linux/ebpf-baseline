@@ -62,7 +62,7 @@ void on_violation_detected(const Rule& rule,
 {
     // 1. 写日志（你已完成）
     spdlog::warn("VIOLATION: {} mode {} -> {} by {}/{}",
-                 file_path, mode_to_string(rule.check_mode), actual_mode, proc_name, pid);
+                 file_path, mode_to_string(rule.check_expected), actual_mode, proc_name, pid);
 
     // 2. 发钉钉（新增）
     if (alert_mgr.IsEnabled()) {
@@ -71,7 +71,7 @@ void on_violation_detected(const Rule& rule,
         evt.rule_name = rule.name;
         evt.severity = rule.severity;
         evt.file_path = file_path;
-        evt.expected = mode_to_string(rule.check_mode);
+        evt.expected = mode_to_string(rule.check_expected);
         evt.actual = actual_mode;
         evt.process_name = proc_name;
         evt.pid = pid;
