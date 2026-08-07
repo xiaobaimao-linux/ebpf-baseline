@@ -148,6 +148,20 @@ Config parseYamlFile(const string &filename) {
                     rule.check_hash = check["hash"].as<string>();
                     rule.has_check_hash = true;
                 }
+                if (check["param"]) {
+                    rule.check_param = check["param"].as<string>();
+                }
+                if (check["operator"]) {
+                    rule.check_operator = check["operator"].as<string>();
+                }
+                if (check["expected"]) {
+                    try {
+                        rule.check_expected_value = check["expected"].as<long long>();
+                    } catch (...) {
+                        spdlog::warn("无法解析 expected 值 (rule: {})", rule.name);
+                        rule.check_expected_value = 0;
+                    }
+                }
                 if (check["on_failure"]) {
                     rule.check_on_failure = check["on_failure"].as<string>();
                 }
@@ -209,12 +223,22 @@ void printRules(const vector<Rule> &rules) {
     for (const auto &rule : rules) {
         spdlog::info("  [{}]", rule.name);
         if (rule.has_check) {
-            spdlog::info("    check_path:   {}", rule.check_path);
-            spdlog::info("    check_mode:   {:o}", rule.check_mode);
+            spdlog::info("    check_types:  {}", fmt::format("{}", fmt::join(rule.check_types, ", ")));
+            if (!rule.check_path.empty()) {
+                spdlog::info("    check_path:   {}", rule.check_path);
+            }
+            if (rule.check_mode != 0) {
+                spdlog::info("    check_mode:   {:o}", rule.check_mode);
+            }
             if (rule.has_check_hash) {
                 spdlog::info("    check_hash:   {}", rule.check_hash);
             } else {
                 spdlog::info("    check_hash:   (未设置)");
+            }
+            if (!rule.check_param.empty()) {
+                spdlog::info("    check_param:  {}", rule.check_param);
+                spdlog::info("    check_op:     {}", rule.check_operator);
+                spdlog::info("    check_expect: {}", rule.check_expected_value);
             }
             spdlog::info("    check_on_failure: {}", rule.check_on_failure.empty() ? "report_only" : rule.check_on_failure);
         }

@@ -8,6 +8,7 @@
     "*.cpp": "cpp",
     "*.h": "cpp"
   },
+  "extensions.autoUpdate": false,
   "chat.tools.terminal.autoApprove": {
     "make": true,
     "./test_config": true

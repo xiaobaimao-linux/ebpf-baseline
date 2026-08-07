@@ -30,6 +30,11 @@ struct Rule {
     std::string check_on_failure = "report_only";
     bool has_check_hash = false;
 
+    // kernel_param 检查字段
+    std::string check_param;            // 如 "kernel.randomize_va_space"
+    std::string check_operator;         // 如 "=", ">=", "<=", "!="
+    long long check_expected_value = 0; // 期望值
+
     bool has_monitor = false;
     std::string monitor_path;
     std::vector<std::string> monitor_events;

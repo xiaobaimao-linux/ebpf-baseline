@@ -54,6 +54,16 @@ rules:
         - "write"
       action: "block"
 
+  # --- 示例规则 5: 内核参数检查 ---
+  - id: "SYS-KERNEL-001"
+    name: "内核地址空间随机化检查"
+    severity: "high"
+    check:
+      type: "kernel_param"
+      param: "kernel.randomize_va_space"
+      operator: "="          # = / >= / <= / !=
+      expected: 2
+      
   # --- 空模板，供您填充 ---
   # - id: ""
     # name: ""
