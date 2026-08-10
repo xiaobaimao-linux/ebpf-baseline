@@ -109,15 +109,16 @@ int main(int argc, char* argv[]) {
     printRules(config.rules);
 
     AlertManager alert_mgr;
-    alert_mgr.LoadConfig(config.alert.dingtalk_webhook,
-                         config.alert.dingtalk_secret,
-                         config.alert.throttle_seconds);
-    
+    alert_mgr.LoadConfig(config.alert, config.db);  // alert + db 分开配置
+    alert_mgr.SetDB(&db);  // 绑定数据库，所有告警统一落库
+
     if (alert_mgr.IsEnabled()) {
         spdlog::info("DingTalk alert enabled, throttle={}s", config.alert.throttle_seconds);
     } else {
-        spdlog::warn("DingTalk alert NOT configured");
+        spdlog::warn("DingTalk alert NOT configured (alerts will still be persisted to DB)");
     }
+    spdlog::info("Alert retention: {} days, max {} records",
+                 config.db.retention_days, config.db.retention_max_records);
 
     compute_inodes(config);
 
@@ -133,7 +134,7 @@ int main(int argc, char* argv[]) {
 
         int ret = 0;
         while (true) {
-            ret = do_monitor(config, alert_mgr, db);
+            ret = do_monitor(config, alert_mgr);
             if (!g_reload) {
                 break;
             }

@@ -14,7 +14,7 @@ struct BaselineRecord {
     std::string recorded_at;    // ISO 8601时间
 };
 
-// 告警记录结构体（新增）
+// 告警记录结构体
 struct AlertRecord {
     std::string rule_id;        // 规则ID
     std::string rule_name;      // 规则名称
@@ -74,7 +74,7 @@ public:
         sqlite3_finalize(stmt);
     }
 
-    // 保存告警记录（新增）
+    // 保存告警记录
     void SaveAlert(const AlertRecord& record) {
         const char* sql = R"(
             INSERT INTO alerts
@@ -108,6 +108,77 @@ public:
                       << " | " << record.recorded_at << std::endl;
         }
         sqlite3_finalize(stmt);
+    }
+
+    // === Retention: 按天数清理 ===
+    // 返回删除的记录数
+    int PurgeAlertsByAge(int retention_days) {
+        if (retention_days <= 0) {
+            return 0;  // 永久保留
+        }
+
+        const char* sql = R"(
+            DELETE FROM alerts
+            WHERE recorded_at < datetime('now', '-' || ? || ' days');
+        )";
+
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+        sqlite3_bind_int(stmt, 1, retention_days);
+
+        int deleted = 0;
+        if (sqlite3_step(stmt) == SQLITE_DONE) {
+            deleted = sqlite3_changes(db_);
+        }
+        sqlite3_finalize(stmt);
+        return deleted;
+    }
+
+    // === Retention: 按数量上限清理（保留最新的N条）===
+    // 返回删除的记录数
+    int PurgeAlertsByCount(int max_records) {
+        if (max_records <= 0) {
+            return 0;  // 不限制
+        }
+
+        const char* sql = R"(
+            DELETE FROM alerts
+            WHERE id NOT IN (
+                SELECT id FROM alerts
+                ORDER BY recorded_at DESC
+                LIMIT ?
+            );
+        )";
+
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+        sqlite3_bind_int(stmt, 1, max_records);
+
+        int deleted = 0;
+        if (sqlite3_step(stmt) == SQLITE_DONE) {
+            deleted = sqlite3_changes(db_);
+        }
+        sqlite3_finalize(stmt);
+        return deleted;
+    }
+
+    // === 回收数据库空间（VACUUM）===
+    void Vacuum() {
+        sqlite3_exec(db_, "VACUUM;", nullptr, nullptr, nullptr);
+    }
+
+    // === 获取当前告警总数 ===
+    int GetAlertCount() {
+        const char* sql = "SELECT COUNT(*) FROM alerts;";
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+
+        int count = 0;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            count = sqlite3_column_int(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+        return count;
     }
 
     // 查询基线
@@ -153,7 +224,7 @@ public:
         return results;
     }
 
-    // 查询告警记录（新增）
+    // 查询告警记录
     std::vector<AlertRecord> GetAlerts(const std::string& rule_id = "",
                                         int limit = 100) {
         std::string sql = "SELECT * FROM alerts";
@@ -210,7 +281,7 @@ private:
         )";
         sqlite3_exec(db_, sql_baselines, nullptr, nullptr, nullptr);
 
-        // 告警记录表（新增）
+        // 告警记录表
         const char* sql_alerts = R"(
             CREATE TABLE IF NOT EXISTS alerts (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,

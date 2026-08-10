@@ -1,5 +1,8 @@
 #include "alert_manager.hpp"
-#include "logger.h"       // 你的日志头文件在 include/ 下
+#include "commonfun.hpp"
+
+
+#include "logger.h"
 #include <spdlog/spdlog.h>
 #include <sstream>
 #include <iomanip>
@@ -8,7 +11,6 @@
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 #include <openssl/bio.h>
-#include <openssl/evp.h>
 #include <openssl/buffer.h>
 
 namespace {
@@ -78,12 +80,19 @@ AlertManager::~AlertManager() {
     curl_global_cleanup();
 }
 
-void AlertManager::LoadConfig(const std::string& dingtalk_webhook,
-                              const std::string& dingtalk_secret,
-                              int throttle_seconds) {
-    dingtalk_url_ = dingtalk_webhook;
-    dingtalk_secret_ = dingtalk_secret;
-    throttle_seconds_ = throttle_seconds;
+void AlertManager::LoadConfig(const AlertConfig& alert_cfg, const DbConfig& db_cfg) {
+    dingtalk_url_      = alert_cfg.dingtalk_webhook;
+    dingtalk_secret_   = alert_cfg.dingtalk_secret;
+    throttle_seconds_  = alert_cfg.throttle_seconds;
+    retention_days_    = db_cfg.retention_days;
+    retention_max_records_ = db_cfg.retention_max_records;
+}
+
+void AlertManager::SetDB(BaselineDB* db) {
+    db_ = db;
+    if (db_) {
+        spdlog::info("AlertManager DB bound, alerts will be persisted to SQLite");
+    }
 }
 
 bool AlertManager::IsEnabled() const {
@@ -93,7 +102,6 @@ bool AlertManager::IsEnabled() const {
 // 检查是否被节流（同一规则在throttle_seconds内只允许一次告警）
 bool AlertManager::IsThrottled(const std::string& rule_id) {
     if (throttle_seconds_ <= 0) {
-        // 节流时间为0或负数表示不节流
         return false;
     }
 
@@ -101,23 +109,97 @@ bool AlertManager::IsThrottled(const std::string& rule_id) {
     auto it = last_alert_time_.find(rule_id);
 
     if (it == last_alert_time_.end()) {
-        // 该规则从未告警过，允许发送
         last_alert_time_[rule_id] = now;
         return false;
     }
 
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second).count();
     if (elapsed >= throttle_seconds_) {
-        // 已经超过节流时间，允许发送，更新时间戳
         it->second = now;
         return false;
     }
 
-    // 在节流时间内，阻止发送
     int remaining = throttle_seconds_ - static_cast<int>(elapsed);
     spdlog::debug("Alert throttled for rule {}: {}s elapsed, {}s remaining",
                   rule_id, elapsed, remaining);
     return true;
+}
+
+// 执行保留策略：按天数 + 按数量双保险
+int AlertManager::RunRetention() {
+    if (!db_) {
+        return 0;
+    }
+
+    int total_deleted = 0;
+    int before_count = db_->GetAlertCount();
+
+    // 策略1：按天数清理
+    if (retention_days_ > 0) {
+        int deleted = db_->PurgeAlertsByAge(retention_days_);
+        if (deleted > 0) {
+            spdlog::info("[retention] Purged {} alerts older than {} days", deleted, retention_days_);
+            total_deleted += deleted;
+        }
+    }
+
+    // 策略2：按数量上限清理（保留最新的N条）
+    if (retention_max_records_ > 0) {
+        int deleted = db_->PurgeAlertsByCount(retention_max_records_);
+        if (deleted > 0) {
+            spdlog::info("[retention] Purged {} alerts exceeding max {} records",
+                         deleted, retention_max_records_);
+            total_deleted += deleted;
+        }
+    }
+
+    // 如果删除了记录，执行VACUUM回收空间
+    if (total_deleted > 0) {
+        int after_count = db_->GetAlertCount();
+        spdlog::info("[retention] Before: {} records, After: {} records, Deleted: {} total",
+                     before_count, after_count, total_deleted);
+
+        spdlog::info("[retention] Running VACUUM to reclaim disk space...");
+        db_->Vacuum();
+        spdlog::info("[retention] VACUUM completed");
+    }
+
+    return total_deleted;
+}
+
+// 统一落库：无论钉钉是否发送成功/被节流，都写入 alerts 表
+void AlertManager::SaveAlertToDB(const AlertEvent& event, bool dingtalk_sent) {
+    if (!db_) {
+        return;
+    }
+
+    AlertRecord record;
+    record.rule_id      = event.rule_id;
+    record.rule_name    = event.rule_name;
+    record.severity     = event.severity;
+    record.file_path    = event.file_path;
+    record.event_type   = event.event_type.empty() ? "unknown" : event.event_type;
+    record.process_name = event.process_name;
+    record.pid          = event.pid;
+    record.expected     = event.expected;
+    record.actual       = event.actual;
+    record.action_taken = event.action_taken.empty() ? "alert" : event.action_taken;
+    record.dingtalk_sent = dingtalk_sent;
+    record.recorded_at  = event.timestamp.empty() ? NowString() : event.timestamp;
+
+    db_->SaveAlert(record);
+
+    // 每插入1000条触发一次保留检查（简单策略）
+    static int insert_count = 0;
+    insert_count++;
+    if (insert_count >= 1000) {
+        insert_count = 0;
+        int current = db_->GetAlertCount();
+        if (retention_max_records_ > 0 && current > retention_max_records_ * 1.2) {
+            spdlog::warn("[retention] Alert count {} exceeds threshold, triggering cleanup", current);
+            RunRetention();
+        }
+    }
 }
 
 size_t AlertManager::WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
@@ -165,18 +247,10 @@ bool AlertManager::PostJson(const std::string& url, const json& payload) {
 }
 
 bool AlertManager::SendDingTalk(const AlertEvent& event) {
-    if (!IsEnabled()) {
-        spdlog::warn("DingTalk not configured, skip alert");
-        return false;
-    }
+    // 1. 检查是否被节流
+    bool throttled = IsThrottled(event.rule_id);
 
-    // 节流检查：同一规则在 throttle_seconds_ 内只告警一次
-    if (IsThrottled(event.rule_id)) {
-        spdlog::warn("Alert suppressed for rule {} due to throttle ({}s)",
-                     event.rule_id, throttle_seconds_);
-        return false;
-    }
-
+    // 2. 构造钉钉消息
     std::string emoji = "";
     if (event.severity == "critical") emoji = "";
     else if (event.severity == "high") emoji = "";
@@ -192,6 +266,9 @@ bool AlertManager::SendDingTalk(const AlertEvent& event) {
     if (!event.process_name.empty()) {
         md += "**进程**: " + event.process_name + " (pid=" + std::to_string(event.pid) + ")\n\n";
     }
+    if (!event.event_type.empty()) {
+        md += "**事件类型**: " + event.event_type + "\n\n";
+    }
     md += "**时间**: " + event.timestamp + "\n\n";
     md += "> baseline-guard 自动检测";
 
@@ -202,6 +279,20 @@ bool AlertManager::SendDingTalk(const AlertEvent& event) {
         {"text", md}
     };
 
-    const std::string signed_url = BuildSignedUrl(dingtalk_url_, dingtalk_secret_);
-    return PostJson(signed_url, payload);
+    // 3. 发送钉钉（如果被节流则跳过）
+    bool dingtalk_sent = false;
+    if (!throttled && IsEnabled()) {
+        const std::string signed_url = BuildSignedUrl(dingtalk_url_, dingtalk_secret_);
+        dingtalk_sent = PostJson(signed_url, payload);
+    } else if (throttled) {
+        spdlog::warn("Alert throttled for rule {} ({}s), skip DingTalk but persist to DB",
+                     event.rule_id, throttle_seconds_);
+    } else if (!IsEnabled()) {
+        spdlog::debug("DingTalk not enabled, skip webhook but persist to DB");
+    }
+
+    // 4. 统一落库（无论钉钉是否发送成功/被节流，都记录到 SQLite）
+    SaveAlertToDB(event, dingtalk_sent);
+
+    return dingtalk_sent;
 }

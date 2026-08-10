@@ -107,6 +107,35 @@ Config parseYamlFile(const string &filename) {
             }
         }
 
+        // 解析 db: 节点（数据库保留策略）
+        if (root["db"]) {
+            const YAML::Node &dbNode = root["db"];
+            if (dbNode["retention_days"]) {
+                try {
+                    config.db.retention_days = dbNode["retention_days"].as<int>();
+                    if (config.db.retention_days > 0) {
+                        spdlog::info("告警保留天数: {} 天", config.db.retention_days);
+                    } else {
+                        spdlog::info("告警保留: 永久");
+                    }
+                } catch (const YAML::Exception &e) {
+                    spdlog::warn("无法解析 db.retention_days 值: {}", e.what());
+                }
+            }
+            if (dbNode["retention_max_records"]) {
+                try {
+                    config.db.retention_max_records = dbNode["retention_max_records"].as<int>();
+                    if (config.db.retention_max_records > 0) {
+                        spdlog::info("告警最大记录数: {} 条", config.db.retention_max_records);
+                    } else {
+                        spdlog::info("告警记录数: 无限制");
+                    }
+                } catch (const YAML::Exception &e) {
+                    spdlog::warn("无法解析 db.retention_max_records 值: {}", e.what());
+                }
+            }
+        }
+
         if (!root["rules"]) {
             spdlog::error("YAML 文件缺少 'rules' 根节点: {}", filename);
             return config;

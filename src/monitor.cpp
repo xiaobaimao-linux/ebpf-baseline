@@ -58,59 +58,34 @@ void on_violation_detected(const Rule& rule,
                            const std::string& actual_mode,
                            const std::string& proc_name,
                            int pid,
-                           AlertManager& alert_mgr,
-                           BaselineDB& db)
+                           AlertManager& alert_mgr)
 {
     // 1. 写日志
     spdlog::warn("VIOLATION: {} mode {} -> {} by {}/{}",
                  file_path, mode_to_string(rule.check_expected), actual_mode, proc_name, pid);
 
-    // 2. 发钉钉（可能因节流被跳过）
-    bool dingtalk_sent = false;
-    if (alert_mgr.IsEnabled()) {
-        AlertEvent evt;
-        evt.rule_id = rule.id;
-        evt.rule_name = rule.name;
-        evt.severity = rule.severity;
-        evt.file_path = file_path;
-        evt.expected = mode_to_string(rule.check_expected);
-        evt.actual = actual_mode;
-        evt.process_name = proc_name;
-        evt.pid = pid;
-        evt.timestamp = NowString();
+    // 2. 发钉钉 + 自动落库（AlertManager 内部统一处理，被节流也入库）
+    AlertEvent evt;
+    evt.rule_id      = rule.id;
+    evt.rule_name    = rule.name;
+    evt.severity     = rule.severity;
+    evt.file_path    = file_path;
+    evt.expected     = mode_to_string(rule.check_expected);
+    evt.actual       = actual_mode;
+    evt.process_name = proc_name;
+    evt.pid          = pid;
+    evt.timestamp    = NowString();
+    evt.event_type   = actual_mode;  // read / write
+    evt.action_taken = actionToString(rule.monitor_action);
 
-        dingtalk_sent = alert_mgr.SendDingTalk(evt);
-    }
-
-    // 3. 落库到 SQLite（无论是否发钉钉都记录，便于后期复查）
-    AlertRecord record;
-    record.rule_id      = rule.id;
-    record.rule_name    = rule.name;
-    record.severity     = rule.severity;
-    record.file_path    = file_path;
-    record.event_type   = actual_mode;   // monitor 场景里 actual_mode 是 "read" 或 "write"
-    record.process_name = proc_name;
-    record.pid          = pid;
-    record.expected     = mode_to_string(rule.check_expected);
-    record.actual       = actual_mode;
-    record.action_taken = actionToString(rule.monitor_action);
-    record.dingtalk_sent = dingtalk_sent;
-    record.recorded_at  = NowString();
-
-    db.SaveAlert(record);
+    alert_mgr.SendDingTalk(evt);
 }
 
 
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)data_sz;
 
-    // ctx 现在包含 alert_mgr 和 db 的指针
-    struct MonitorCtx {
-        AlertManager* alert_mgr;
-        BaselineDB* db;
-    };
-
-    auto* ctx_wrapper = static_cast<MonitorCtx*>(ctx);
+    auto* alert_mgr = static_cast<AlertManager*>(ctx);
     auto* e = static_cast<struct event *>(data);
 
     auto it_rule = g_inode_to_rule.find(e->ino);
@@ -126,9 +101,8 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     const std::string &path = it_path->second;
 
     const std::string actual_event = ((e->mask & EVENT_READ) != 0) ? "read" : "write";
-    if (ctx_wrapper != nullptr && ctx_wrapper->alert_mgr != nullptr && ctx_wrapper->db != nullptr) {
-        on_violation_detected(rule, path, actual_event, e->comm, e->pid,
-                              *ctx_wrapper->alert_mgr, *ctx_wrapper->db);
+    if (alert_mgr != nullptr) {
+        on_violation_detected(rule, path, actual_event, e->comm, e->pid, *alert_mgr);
     }
 
     auto it_hash = g_inode_to_hash.find(e->ino);
@@ -160,7 +134,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     return 0;
 }
 
-int do_monitor(const Config& config, AlertManager &alert_mgr, BaselineDB& db) {
+int do_monitor(const Config& config, AlertManager &alert_mgr) {
     struct lsm_file_bpf *skel;
     int err;
 
@@ -210,14 +184,8 @@ int do_monitor(const Config& config, AlertManager &alert_mgr, BaselineDB& db) {
 
     spdlog::info("Monitoring started. Press Ctrl+C to stop.");
 
-    // 包装上下文，同时传递 alert_mgr 和 db
-    struct MonitorCtx {
-        AlertManager* alert_mgr;
-        BaselineDB* db;
-    } ctx_wrapper = { &alert_mgr, &db };
-
     struct ring_buffer *rb =
-        ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, &ctx_wrapper, nullptr);
+        ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, &alert_mgr, nullptr);
 
     if (!rb) {
         spdlog::error("[bpf_program_error] Failed to create ring buffer");
@@ -226,12 +194,20 @@ int do_monitor(const Config& config, AlertManager &alert_mgr, BaselineDB& db) {
     }
 
     int count = 0;
+    // 每1小时(约36000次poll)触发一次保留策略清理
+    const int RETENTION_INTERVAL = 36000;  // 100ms * 36000 = 3600s = 1h
     while (running) {
         count++;
         err = ring_buffer__poll(rb, 100);
         if (err < 0 && err != -EINTR) {
             spdlog::error("[bpf_program_error] Error polling ring buffer: {}", err);
             break;
+        }
+
+        // 定期执行保留策略清理
+        if (count % RETENTION_INTERVAL == 0) {
+            int deleted = alert_mgr.RunRetention();
+            (void)deleted;  // 避免unused警告
         }
     }
 
