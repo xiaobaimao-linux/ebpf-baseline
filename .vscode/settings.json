@@ -11,6 +11,7 @@
   "extensions.autoUpdate": false,
   "chat.tools.terminal.autoApprove": {
     "make": true,
-    "./test_config": true
+    "./test_config": true,
+    "./baseline-guard": true
   }
 }
