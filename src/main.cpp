@@ -109,10 +109,12 @@ int main(int argc, char* argv[]) {
     printRules(config.rules);
 
     AlertManager alert_mgr;
-    alert_mgr.LoadConfig(config.alert.dingtalk_webhook, config.alert.dingtalk_secret);
+    alert_mgr.LoadConfig(config.alert.dingtalk_webhook,
+                         config.alert.dingtalk_secret,
+                         config.alert.throttle_seconds);
     
     if (alert_mgr.IsEnabled()) {
-        spdlog::info("DingTalk alert enabled");
+        spdlog::info("DingTalk alert enabled, throttle={}s", config.alert.throttle_seconds);
     } else {
         spdlog::warn("DingTalk alert NOT configured");
     }
@@ -131,7 +133,7 @@ int main(int argc, char* argv[]) {
 
         int ret = 0;
         while (true) {
-            ret = do_monitor(config, alert_mgr);
+            ret = do_monitor(config, alert_mgr, db);
             if (!g_reload) {
                 break;
             }

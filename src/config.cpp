@@ -100,6 +100,7 @@ Config parseYamlFile(const string &filename) {
             if (alertNode["throttle"]) {
                 try {
                     config.alert.throttle_seconds = alertNode["throttle"].as<int>();
+                    spdlog::info("告警节流配置: {} 秒", config.alert.throttle_seconds);
                 } catch (const YAML::Exception &e) {
                     spdlog::warn("无法解析 alert.throttle 值: {}", e.what());
                 }

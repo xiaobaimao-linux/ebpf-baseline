@@ -58,13 +58,15 @@ void on_violation_detected(const Rule& rule,
                            const std::string& actual_mode,
                            const std::string& proc_name,
                            int pid,
-                           AlertManager& alert_mgr) 
+                           AlertManager& alert_mgr,
+                           BaselineDB& db)
 {
-    // 1. 写日志（你已完成）
+    // 1. 写日志
     spdlog::warn("VIOLATION: {} mode {} -> {} by {}/{}",
                  file_path, mode_to_string(rule.check_expected), actual_mode, proc_name, pid);
 
-    // 2. 发钉钉（新增）
+    // 2. 发钉钉（可能因节流被跳过）
+    bool dingtalk_sent = false;
     if (alert_mgr.IsEnabled()) {
         AlertEvent evt;
         evt.rule_id = rule.id;
@@ -76,18 +78,40 @@ void on_violation_detected(const Rule& rule,
         evt.process_name = proc_name;
         evt.pid = pid;
         evt.timestamp = NowString();
-        
-        alert_mgr.SendDingTalk(evt);
-    }
-}
 
+        dingtalk_sent = alert_mgr.SendDingTalk(evt);
+    }
+
+    // 3. 落库到 SQLite（无论是否发钉钉都记录，便于后期复查）
+    AlertRecord record;
+    record.rule_id      = rule.id;
+    record.rule_name    = rule.name;
+    record.severity     = rule.severity;
+    record.file_path    = file_path;
+    record.event_type   = actual_mode;   // monitor 场景里 actual_mode 是 "read" 或 "write"
+    record.process_name = proc_name;
+    record.pid          = pid;
+    record.expected     = mode_to_string(rule.check_expected);
+    record.actual       = actual_mode;
+    record.action_taken = actionToString(rule.monitor_action);
+    record.dingtalk_sent = dingtalk_sent;
+    record.recorded_at  = NowString();
+
+    db.SaveAlert(record);
+}
 
 
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)data_sz;
 
-    auto *e = static_cast<struct event *>(data);
-    auto *alert_mgr = static_cast<AlertManager *>(ctx);
+    // ctx 现在包含 alert_mgr 和 db 的指针
+    struct MonitorCtx {
+        AlertManager* alert_mgr;
+        BaselineDB* db;
+    };
+
+    auto* ctx_wrapper = static_cast<MonitorCtx*>(ctx);
+    auto* e = static_cast<struct event *>(data);
 
     auto it_rule = g_inode_to_rule.find(e->ino);
     if (it_rule == g_inode_to_rule.end()) {
@@ -102,8 +126,9 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     const std::string &path = it_path->second;
 
     const std::string actual_event = ((e->mask & EVENT_READ) != 0) ? "read" : "write";
-    if (alert_mgr != nullptr) {
-        on_violation_detected(rule, path, actual_event, e->comm, e->pid, *alert_mgr);
+    if (ctx_wrapper != nullptr && ctx_wrapper->alert_mgr != nullptr && ctx_wrapper->db != nullptr) {
+        on_violation_detected(rule, path, actual_event, e->comm, e->pid,
+                              *ctx_wrapper->alert_mgr, *ctx_wrapper->db);
     }
 
     auto it_hash = g_inode_to_hash.find(e->ino);
@@ -135,7 +160,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     return 0;
 }
 
-int do_monitor(const Config &config, AlertManager &alert_mgr) {
+int do_monitor(const Config& config, AlertManager &alert_mgr, BaselineDB& db) {
     struct lsm_file_bpf *skel;
     int err;
 
@@ -185,8 +210,14 @@ int do_monitor(const Config &config, AlertManager &alert_mgr) {
 
     spdlog::info("Monitoring started. Press Ctrl+C to stop.");
 
+    // 包装上下文，同时传递 alert_mgr 和 db
+    struct MonitorCtx {
+        AlertManager* alert_mgr;
+        BaselineDB* db;
+    } ctx_wrapper = { &alert_mgr, &db };
+
     struct ring_buffer *rb =
-        ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, &alert_mgr, nullptr);
+        ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, &ctx_wrapper, nullptr);
 
     if (!rb) {
         spdlog::error("[bpf_program_error] Failed to create ring buffer");

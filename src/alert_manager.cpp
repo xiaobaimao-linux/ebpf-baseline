@@ -78,13 +78,46 @@ AlertManager::~AlertManager() {
     curl_global_cleanup();
 }
 
-void AlertManager::LoadConfig(const std::string& dingtalk_webhook, const std::string& dingtalk_secret) {
+void AlertManager::LoadConfig(const std::string& dingtalk_webhook,
+                              const std::string& dingtalk_secret,
+                              int throttle_seconds) {
     dingtalk_url_ = dingtalk_webhook;
     dingtalk_secret_ = dingtalk_secret;
+    throttle_seconds_ = throttle_seconds;
 }
 
 bool AlertManager::IsEnabled() const {
     return !dingtalk_url_.empty();
+}
+
+// 检查是否被节流（同一规则在throttle_seconds内只允许一次告警）
+bool AlertManager::IsThrottled(const std::string& rule_id) {
+    if (throttle_seconds_ <= 0) {
+        // 节流时间为0或负数表示不节流
+        return false;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    auto it = last_alert_time_.find(rule_id);
+
+    if (it == last_alert_time_.end()) {
+        // 该规则从未告警过，允许发送
+        last_alert_time_[rule_id] = now;
+        return false;
+    }
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second).count();
+    if (elapsed >= throttle_seconds_) {
+        // 已经超过节流时间，允许发送，更新时间戳
+        it->second = now;
+        return false;
+    }
+
+    // 在节流时间内，阻止发送
+    int remaining = throttle_seconds_ - static_cast<int>(elapsed);
+    spdlog::debug("Alert throttled for rule {}: {}s elapsed, {}s remaining",
+                  rule_id, elapsed, remaining);
+    return true;
 }
 
 size_t AlertManager::WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
@@ -137,10 +170,17 @@ bool AlertManager::SendDingTalk(const AlertEvent& event) {
         return false;
     }
 
-    std::string emoji = "🟡";
-    if (event.severity == "critical") emoji = "🔴";
-    else if (event.severity == "high") emoji = "🟠";
-    else if (event.severity == "low") emoji = "🟢";
+    // 节流检查：同一规则在 throttle_seconds_ 内只告警一次
+    if (IsThrottled(event.rule_id)) {
+        spdlog::warn("Alert suppressed for rule {} due to throttle ({}s)",
+                     event.rule_id, throttle_seconds_);
+        return false;
+    }
+
+    std::string emoji = "";
+    if (event.severity == "critical") emoji = "";
+    else if (event.severity == "high") emoji = "";
+    else if (event.severity == "low") emoji = "";
 
     std::string md = emoji + " **基线违规告警**\n\n";
     md += "**规则ID**: " + event.rule_id + "\n\n";
