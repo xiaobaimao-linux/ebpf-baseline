@@ -8,9 +8,12 @@
 #include <bpf/libbpf.h>
 #include <csignal>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <linux/types.h>
+#include <pwd.h>
 #include <spdlog/spdlog.h>
+#include <sys/types.h>
 #include <unordered_map>
 #include <sstream>
 
@@ -24,6 +27,42 @@ void signal_handler(int sig) {
     if (sig == SIGTERM) {
         spdlog::info("[service_stop] received SIGTERM, shutting down gracefully");
     }
+}
+
+static std::string ResolveUserInfoByPid(int pid, std::string& uid) {
+    uid.clear();
+    std::string user_name;
+
+    if (pid <= 0) {
+        return user_name;
+    }
+
+    const std::string proc_status = "/proc/" + std::to_string(pid) + "/status";
+    std::ifstream in(proc_status);
+    if (!in.is_open()) {
+        return user_name;
+    }
+
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("Uid:", 0) == 0) {
+            std::istringstream iss(line);
+            std::string key;
+            iss >> key;
+            int raw_uid = 0;
+            iss >> raw_uid;
+            if (raw_uid > 0) {
+                uid = std::to_string(raw_uid);
+                struct passwd* pw = getpwuid(static_cast<uid_t>(raw_uid));
+                if (pw != nullptr) {
+                    user_name = pw->pw_name;
+                }
+            }
+            break;
+        }
+    }
+
+    return user_name;
 }
 
 // 全局映射（或封装到类）
@@ -60,9 +99,14 @@ void on_violation_detected(const Rule& rule,
                            int pid,
                            AlertManager& alert_mgr)
 {
+    std::string uid;
+    const std::string user_name = ResolveUserInfoByPid(pid, uid);
+
     // 1. 写日志
-    spdlog::warn("VIOLATION: {} mode {} -> {} by {}/{}",
-                 file_path, mode_to_string(rule.check_expected), actual_mode, proc_name, pid);
+    spdlog::warn("VIOLATION: {} mode {} -> {} by {}/{} user={} uid={}",
+                 file_path, mode_to_string(rule.check_expected), actual_mode, proc_name, pid,
+                 user_name.empty() ? "unknown" : user_name,
+                 uid.empty() ? "-" : uid);
 
     // 2. 发钉钉 + 自动落库（AlertManager 内部统一处理，被节流也入库）
     AlertEvent evt;
@@ -74,6 +118,8 @@ void on_violation_detected(const Rule& rule,
     evt.actual       = actual_mode;
     evt.process_name = proc_name;
     evt.pid          = pid;
+    evt.user_name    = user_name;
+    evt.uid          = uid;
     evt.timestamp    = NowString();
     evt.event_type   = actual_mode;  // read / write
     evt.action_taken = actionToString(rule.monitor_action);
@@ -81,6 +127,81 @@ void on_violation_detected(const Rule& rule,
     alert_mgr.SendDingTalk(evt);
 }
 
+void on_check_mismatch_detected(const Rule& rule,
+                                const std::string& file_path,
+                                const std::string& proc_name,
+                                int pid,
+                                AlertManager& alert_mgr)
+{
+    if (!rule.has_check || rule.check_path.empty() || rule.check_path != file_path) {
+        return;
+    }
+
+    struct stat st;
+    if (stat(file_path.c_str(), &st) != 0) {
+        return;
+    }
+
+    const mode_t actual_mode = st.st_mode & 0777;
+    const bool expected_hash = !rule.check_hash.empty();
+    const bool expected_perm = rule.check_expected != 0;
+
+    const std::string actual_hash = compute_sha256(const_cast<std::string&>(file_path));
+
+    bool permission_match = true;
+    bool hash_match = true;
+
+    if (expected_perm) {
+        permission_match = (actual_mode == rule.check_expected);
+    }
+    if (expected_hash) {
+        hash_match = (actual_hash == rule.check_hash);
+    }
+
+    if (permission_match && hash_match) {
+        return;
+    }
+
+    std::string uid;
+    const std::string user_name = ResolveUserInfoByPid(pid, uid);
+
+    std::ostringstream msg;
+    msg << "check mismatch detected by monitor";
+    if (!permission_match) {
+        msg << " permission=" << mode_to_string(actual_mode) << " expected=" << mode_to_string(rule.check_expected);
+    }
+    if (!hash_match) {
+        msg << " hash=" << actual_hash << " expected=" << rule.check_hash;
+    }
+
+    spdlog::warn("[monitor_check_mismatch] {} process={} pid={} user={} uid={} file={}",
+                 msg.str(), proc_name, pid,
+                 user_name.empty() ? "unknown" : user_name,
+                 uid.empty() ? "-" : uid,
+                 file_path);
+
+    AlertEvent evt;
+    evt.rule_id      = rule.id;
+    evt.rule_name    = rule.name;
+    evt.severity     = rule.severity;
+    evt.file_path    = file_path;
+    evt.expected     = (expected_perm ? mode_to_string(rule.check_expected) : "-");
+    evt.actual       = (expected_perm ? mode_to_string(actual_mode) : "-");
+    evt.process_name = proc_name;
+    evt.pid          = pid;
+    evt.user_name    = user_name;
+    evt.uid          = uid;
+    evt.timestamp    = NowString();
+    evt.event_type   = "check_mismatch";
+    evt.action_taken = actionToString(rule.monitor_action);
+
+    if (!rule.check_hash.empty()) {
+        evt.expected += "|hash=" + rule.check_hash;
+        evt.actual += "|hash=" + actual_hash;
+    }
+
+    alert_mgr.SendDingTalk(evt);
+}
 
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)data_sz;
@@ -103,6 +224,10 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     const std::string actual_event = ((e->mask & EVENT_READ) != 0) ? "read" : "write";
     if (alert_mgr != nullptr) {
         on_violation_detected(rule, path, actual_event, e->comm, e->pid, *alert_mgr);
+    }
+
+    if (alert_mgr != nullptr && (e->mask & EVENT_WRITE) != 0) {
+        on_check_mismatch_detected(rule, path, e->comm, e->pid, *alert_mgr);
     }
 
     auto it_hash = g_inode_to_hash.find(e->ino);

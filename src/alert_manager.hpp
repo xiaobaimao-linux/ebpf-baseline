@@ -18,6 +18,8 @@ struct AlertEvent {
     std::string actual;     // 实际值（如 0777）
     std::string process_name;
     int pid = 0;
+    std::string user_name;  // 触发该告警的 Linux 用户名
+    std::string uid;        // 触发该告警的 uid（字符串）
     std::string timestamp;
     std::string event_type;     // 事件类型: read / write / check_fail
     std::string action_taken;   // alert / block / report_only

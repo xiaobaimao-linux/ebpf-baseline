@@ -181,6 +181,8 @@ void AlertManager::SaveAlertToDB(const AlertEvent& event, bool dingtalk_sent) {
     record.event_type   = event.event_type.empty() ? "unknown" : event.event_type;
     record.process_name = event.process_name;
     record.pid          = event.pid;
+    record.user_name    = event.user_name;
+    record.uid          = event.uid;
     record.expected     = event.expected;
     record.actual       = event.actual;
     record.action_taken = event.action_taken.empty() ? "alert" : event.action_taken;
