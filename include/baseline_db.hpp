@@ -68,6 +68,10 @@ public:
                                         int limit = 20,
                                         bool today = false);
 
+    // 查询 monitor 原始事件：时间边界均为包含式，空边界表示不限制
+    std::vector<AlertRecord> GetMonitorEvents(const std::string& start = "",
+                                               const std::string& end = "");
+
 private:
     sqlite3* db_ = nullptr;
 

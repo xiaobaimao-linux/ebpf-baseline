@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <fstream>
+#include <ctime>
 
 static volatile bool g_reload = false;
 
@@ -42,8 +43,18 @@ void PrintAlertsUsage() {
     printf("  --today               only show alerts from today\n");
     printf("  --rule=<name>         filter by rule_id/rule_name\n");
     printf("  --rule <name>         same as above\n");
-    printf("  --report_html         output to HTML file instead of screen\n");
-    printf("                        file: /var/log/baseline-guard/alerts-<timestamp>.html\n");
+}
+
+void PrintReportUsage() {
+    printf("Usage: %s report [--start <time>] [--end <time>] -o <file>\n", "baseline-guard");
+    printf("Options:\n");
+    printf("  --start <time>        inclusive start time\n");
+    printf("  --end <time>          inclusive end time\n");
+    printf("  -o, --output <file>   output HTML file (required)\n");
+    printf("Time formats:\n");
+    printf("  YYYY-MM-DD or YYYY-MM-DD HH:MM:SS (T may replace the space)\n");
+    printf("Example:\n");
+    printf("  baseline-guard report --start 2026-08-01 --end 2026-08-10 -o events.html\n");
 }
 
 std::string NormalizeTimestamp(const std::string& timestamp) {
@@ -81,16 +92,61 @@ std::string GetCurrentTimeForHtml() {
     return ss.str();
 }
 
-// 生成告警历史 HTML 报告
-bool GenerateAlertsHtml(const std::vector<AlertRecord>& records,
-                        const std::string& output_path) {
-    int total = records.size();
-    int dingtalk_sent = 0;
-    int dingtalk_skipped = 0;
-    for (const auto& r : records) {
-        if (r.dingtalk_sent) dingtalk_sent++;
-        else dingtalk_skipped++;
+bool NormalizeReportTime(const std::string& value, bool end_of_day, std::string& normalized) {
+    std::string input = value;
+    if (input.size() == 10) {
+        input += end_of_day ? " 23:59:59" : " 00:00:00";
+    } else if (input.size() == 19 && input[10] == 'T') {
+        input[10] = ' ';
     }
+
+    if (input.size() != 19 || input[4] != '-' || input[7] != '-' || input[10] != ' ' ||
+        input[13] != ':' || input[16] != ':') {
+        return false;
+    }
+
+    std::tm tm = {};
+    std::istringstream ss(input);
+    ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+    if (ss.fail()) {
+        return false;
+    }
+
+    const int year = tm.tm_year;
+    const int month = tm.tm_mon;
+    const int day = tm.tm_mday;
+    const int hour = tm.tm_hour;
+    const int minute = tm.tm_min;
+    const int second = tm.tm_sec;
+    tm.tm_isdst = -1;
+    const std::time_t timestamp = std::mktime(&tm);
+    if (timestamp == static_cast<std::time_t>(-1)) {
+        return false;
+    }
+    const std::tm verified = *std::localtime(&timestamp);
+    if (verified.tm_year != year || verified.tm_mon != month || verified.tm_mday != day ||
+        verified.tm_hour != hour || verified.tm_min != minute || verified.tm_sec != second) {
+        return false;
+    }
+
+    normalized = input;
+    return true;
+}
+
+std::string SeverityClass(const std::string& severity) {
+    if (severity == "critical" || severity == "high" ||
+        severity == "medium" || severity == "low") {
+        return "severity-" + severity;
+    }
+    return "";
+}
+
+// 生成 monitor 原始事件 HTML 报告
+bool GenerateMonitorEventsHtml(const std::vector<AlertRecord>& records,
+                               const std::string& output_path,
+                               const std::string& start,
+                               const std::string& end) {
+    const int total = static_cast<int>(records.size());
 
     std::ofstream fs(output_path);
     if (!fs.is_open()) {
@@ -101,37 +157,32 @@ bool GenerateAlertsHtml(const std::vector<AlertRecord>& records,
 <html>
 <head>
 <meta charset="UTF-8">
-<title>baseline-guard 告警历史报告</title>
+<title>baseline-guard monitor 事件报告</title>
 <style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;max-width:1200px;margin:40px auto;padding:0 20px;color:#333}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;max-width:1400px;margin:40px auto;padding:0 20px;color:#333}
 h1{color:#1a1a1a;border-bottom:2px solid #dc3545;padding-bottom:10px}
 .summary{display:flex;gap:20px;margin:20px 0}
-.summary-box{flex:1;padding:20px;border-radius:8px;text-align:center}
-.summary-box.total{background:#f6f8fa}
-.summary-box.sent{background:#d4edda;color:#155724}
-.summary-box.skip{background:#fff3cd;color:#856404}
+.summary-box{padding:20px 40px;border-radius:8px;text-align:center;background:#f6f8fa}
 table{width:100%;border-collapse:collapse;margin:20px 0;font-size:13px}
 th{background:#f6f8fa;padding:12px;text-align:left;border-bottom:2px solid #dfe2e5;font-weight:600;white-space:nowrap}
 td{padding:10px 12px;border-bottom:1px solid #eaecef}
 tr:hover{background:#f6f8fa}
-.status-sent{color:#28a745;font-weight:600}
-.status-skip{color:#fd7e14;font-weight:600}
 .severity-critical{color:#dc3545;font-weight:bold}
 .severity-high{color:#fd7e14;font-weight:bold}
-.severity-medium{color:#ffc107}
+.severity-medium{color:#b8860b}
 .severity-low{color:#6c757d}
 .footer{margin-top:40px;padding-top:20px;border-top:1px solid #eaecef;color:#666;font-size:12px;text-align:center}
 </style>
 </head>
 <body>
-<h1>🚨 baseline-guard 告警历史报告</h1>
+<h1>baseline-guard monitor 事件报告</h1>
 <p>生成时间：)" << GetCurrentTimeForHtml() << R"(</p>
 <p>主机：)" << EscapeHtml(GetHostname()) << R"(</p>
+<p>筛选范围：)" << EscapeHtml(start.empty() ? "不限" : start)
+       << " — " << EscapeHtml(end.empty() ? "不限" : end) << R"(</p>
 
 <div class="summary">
-<div class="summary-box total"><h2>)" << total << R"(</h2><p>告警总数</p></div>
-<div class="summary-box sent"><h2>)" << dingtalk_sent << R"(</h2><p>已推送钉钉</p></div>
-<div class="summary-box skip"><h2>)" << dingtalk_skipped << R"(</h2><p>钉钉节流/未推送</p></div>
+<div class="summary-box"><h2>)" << total << R"(</h2><p>事件总数</p></div>
 </div>
 
 <table>
@@ -143,10 +194,10 @@ tr:hover{background:#f6f8fa}
 <th>严重级别</th>
 <th>文件路径</th>
 <th>事件类型</th>
-<th>进程</th>
+<th>进程/PID</th>
+<th>用户/UID</th>
 <th>预期→实际</th>
 <th>动作</th>
-<th>钉钉推送</th>
 </tr>
 </thead>
 <tbody>
@@ -154,25 +205,26 @@ tr:hover{background:#f6f8fa}
 
     for (const auto& r : records) {
         const std::string timestamp = NormalizeTimestamp(r.recorded_at);
-        const std::string sev_class = "severity-" + r.severity;
-        const std::string push_class = r.dingtalk_sent ? "status-sent" : "status-skip";
-        const std::string push_text = r.dingtalk_sent ? "✓ 已推送" : "✗ 未推送";
+        const std::string sev_class = SeverityClass(r.severity);
         const std::string details = r.expected.empty() || r.actual.empty()
             ? "-"
             : (EscapeHtml(r.expected) + " → " + EscapeHtml(r.actual));
+        const std::string process = (r.process_name.empty() ? "-" : EscapeHtml(r.process_name))
+            + " (pid=" + (r.pid > 0 ? std::to_string(r.pid) : "-") + ")";
+        const std::string user = EscapeHtml(r.user_name.empty() ? "-" : r.user_name)
+            + " (uid=" + EscapeHtml(r.uid.empty() ? "-" : r.uid) + ")";
 
         fs << "<tr>\n";
         fs << "<td>" << EscapeHtml(timestamp) << "</td>\n";
         fs << "<td><code>" << EscapeHtml(r.rule_id) << "</code></td>\n";
-        fs << "<td>" << EscapeHtml(r.rule_name) << "</td>\n";
+        fs << "<td>" << EscapeHtml(r.rule_name.empty() ? "-" : r.rule_name) << "</td>\n";
         fs << "<td class=\"" << sev_class << "\">" << EscapeHtml(r.severity) << "</td>\n";
         fs << "<td><code>" << EscapeHtml(r.file_path) << "</code></td>\n";
         fs << "<td>" << EscapeHtml(r.event_type.empty() ? "-" : r.event_type) << "</td>\n";
-        fs << "<td>" << EscapeHtml(r.process_name.empty() ? "-" : r.process_name)
-           << "(pid=" << r.pid << ")</td>\n";
+        fs << "<td>" << process << "</td>\n";
+        fs << "<td>" << user << "</td>\n";
         fs << "<td>" << details << "</td>\n";
         fs << "<td>" << EscapeHtml(r.action_taken.empty() ? "-" : r.action_taken) << "</td>\n";
-        fs << "<td class=\"" << push_class << "\">" << push_text << "</td>\n";
         fs << "</tr>\n";
     }
 
@@ -273,6 +325,7 @@ int main(int argc, char* argv[]) {
             printf("  --check               check baseline\n");
             printf("  --monitor             monitor baseline\n");
             printf("  alerts                show alert history from SQLite\n");
+            printf("  report                export monitor events to HTML\n");
             return 0;
         } else if (arg == "-C" || arg == "--check") {
             cmd = "check";
@@ -280,11 +333,73 @@ int main(int argc, char* argv[]) {
         } else if (arg == "-m" || arg == "--monitor") {
             cmd = "monitor";
             spdlog::debug("command is : monitor");
+        } else if (arg == "report") {
+            std::string start;
+            std::string end;
+            std::string output_path;
+            int j = i + 1;
+            while (j < argc) {
+                const std::string subarg = argv[j];
+                if (subarg == "-h" || subarg == "--help") {
+                    PrintReportUsage();
+                    return 0;
+                } else if (subarg == "-o" || subarg == "--output") {
+                    if (j + 1 >= argc) {
+                        fprintf(stderr, "Error: missing value for %s\n", subarg.c_str());
+                        return 1;
+                    }
+                    output_path = argv[++j];
+                } else if (subarg.rfind("--output=", 0) == 0) {
+                    output_path = subarg.substr(std::string("--output=").size());
+                } else if (subarg == "--start" || subarg == "--end") {
+                    if (j + 1 >= argc) {
+                        fprintf(stderr, "Error: missing value for %s\n", subarg.c_str());
+                        return 1;
+                    }
+                    const std::string value = argv[++j];
+                    std::string normalized;
+                    if (!NormalizeReportTime(value, subarg == "--end", normalized)) {
+                        fprintf(stderr, "Error: invalid time for %s: %s\n", subarg.c_str(), value.c_str());
+                        return 1;
+                    }
+                    (subarg == "--start" ? start : end) = normalized;
+                } else if (subarg.rfind("--start=", 0) == 0 || subarg.rfind("--end=", 0) == 0) {
+                    const bool is_end = subarg.rfind("--end=", 0) == 0;
+                    const std::string value = subarg.substr(is_end ? 6 : 8);
+                    std::string normalized;
+                    if (!NormalizeReportTime(value, is_end, normalized)) {
+                        fprintf(stderr, "Error: invalid time: %s\n", value.c_str());
+                        return 1;
+                    }
+                    (is_end ? end : start) = normalized;
+                } else {
+                    fprintf(stderr, "Error: unknown report option: %s\n", subarg.c_str());
+                    return 1;
+                }
+                ++j;
+            }
+
+            if (output_path.empty()) {
+                fprintf(stderr, "Error: output file required (-o <file>)\n");
+                return 1;
+            }
+            if (!start.empty() && !end.empty() && start > end) {
+                fprintf(stderr, "Error: --start must not be later than --end\n");
+                return 1;
+            }
+
+            const auto events = db.GetMonitorEvents(start, end);
+            if (!GenerateMonitorEventsHtml(events, output_path, start, end)) {
+                fprintf(stderr, "Error: failed to generate HTML report: %s\n", output_path.c_str());
+                return 1;
+            }
+            std::cout << "Monitor event report generated: " << output_path << std::endl;
+            std::cout << "Total events: " << events.size() << std::endl;
+            return 0;
         } else if (arg == "alerts") {
             cmd = arg;
             int j = i + 1;
             bool today = false;
-            bool report_html = false;
             int limit = 20;
             std::string rule;
             while (j < argc) {
@@ -306,7 +421,8 @@ int main(int argc, char* argv[]) {
                 } else if (subarg == "--today") {
                     today = true;
                 } else if (subarg == "--report_html") {
-                    report_html = true;
+                    fprintf(stderr, "Error: --report_html has moved; use baseline-guard report -o <file>\n");
+                    return 1;
                 } else if (subarg.rfind("--rule=", 0) == 0) {
                     rule = subarg.substr(std::string("--rule=").size());
                 } else if (subarg == "--rule") {
@@ -331,25 +447,14 @@ int main(int argc, char* argv[]) {
                         return 1;
                     }
                 } else {
-                    break;
+                    fprintf(stderr, "Error: unknown alerts option: %s\n", subarg.c_str());
+                    return 1;
                 }
                 ++j;
             }
 
-            auto alerts = db.GetAlerts(rule, limit, today);
-
-            if (report_html) {
-                std::string output_path = "/var/log/baseline-guard/alerts-" + NowString() + ".html";
-                if (GenerateAlertsHtml(alerts, output_path)) {
-                    std::cout << "Alert report generated: " << output_path << std::endl;
-                    std::cout << "Total records: " << alerts.size() << std::endl;
-                } else {
-                    std::cerr << "Failed to generate HTML report." << std::endl;
-                    return 1;
-                }
-            } else {
-                PrintAlerts(alerts);
-            }
+            const auto alerts = db.GetAlerts(rule, limit, today);
+            PrintAlerts(alerts);
             return 0;
         } else if (cmd.empty()) {
             cmd = arg;

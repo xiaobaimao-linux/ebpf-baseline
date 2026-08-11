@@ -116,21 +116,21 @@ $ ./baseline-guard monitor -c rules.yaml
 
 ------
 
-### 模块4：合规报告生成
+### 模块4：monitor 事件报告
 
+```bash
+./baseline-guard report --start 2026-08-01 --end 2026-08-10 -o ./monitor-events.html
 ```
-$ ./baseline-guard report -c rules.yaml -o ./reports
-```
 
-报告包含：
+`report` 从 SQLite 的 `alerts` 表读取 monitor 持久化的原始事件并输出 HTML。`-o` 指定输出文件，不能省略；无需传入规则配置文件。
 
-- **封面**：主机名、IP、扫描时间、基线版本
-- **执行摘要**：通过率、合规评分、最高风险项
-- **详细检查结果**：按规则 ID 分组，含当前值/期望值/状态/风险等级
-- **运行时安全事件**：时间戳、进程信息、操作、结果、证据路径
-- **修复建议**：按 P0/P1/P2 优先级排序
-- **等保2.0 映射表**：规则 ↔ 等保条款
-- **证据包**：一键打包，可提交测评机构
+- `--start`：包含式开始时间，可省略
+- `--end`：包含式结束时间，可省略
+- 时间支持 `YYYY-MM-DD`、`YYYY-MM-DD HH:MM:SS` 和 `YYYY-MM-DDTHH:MM:SS`
+- 仅指定日期时，开始日期按 `00:00:00`、结束日期按 `23:59:59` 处理
+- 两个时间参数都省略时输出全部 monitor 事件
+
+报告包含事件时间、规则、严重级别、文件、事件类型、进程/PID、用户/UID、预期值、实际值和动作。原有 `alerts` 命令仍用于控制台查询；HTML 输出已从 `alerts --report_html` 迁移到 `report -o`。
 
 ------
 

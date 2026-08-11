@@ -199,6 +199,7 @@ std::vector<BaselineRecord> BaselineDB::GetAllBaselines() {
     return results;
 }
 
+
 // 查询告警记录：支持 rule 过滤、今日过滤、数量限制
 std::vector<AlertRecord> BaselineDB::GetAlerts(const std::string &rule_filter, int limit,
                                                bool today) {
@@ -278,6 +279,71 @@ std::vector<AlertRecord> BaselineDB::GetAlerts(const std::string &rule_filter, i
         results.push_back(r);
     }
 
+    sqlite3_finalize(stmt);
+    return results;
+}
+
+std::vector<AlertRecord> BaselineDB::GetMonitorEvents(const std::string& start,
+                                                       const std::string& end) {
+    const std::string normalized_time = R"(CASE
+        WHEN length(recorded_at) >= 17 AND substr(recorded_at, 5, 1) != '-' THEN
+            substr(recorded_at, 1, 4) || '-' || substr(recorded_at, 5, 2) || '-' ||
+            substr(recorded_at, 7, 2) || ' ' || substr(recorded_at, 10, 2) || ':' ||
+            substr(recorded_at, 13, 2) || ':' || substr(recorded_at, 16, 2)
+        ELSE replace(substr(recorded_at, 1, 19), 'T', ' ')
+    END)";
+
+    std::string sql =
+        "SELECT rule_id, rule_name, severity, file_path, event_type, process_name, pid, "
+        "user_name, uid, expected, actual, action_taken, dingtalk_sent, recorded_at "
+        "FROM alerts";
+    if (!start.empty() || !end.empty()) {
+        sql += " WHERE ";
+        if (!start.empty()) {
+            sql += "(" + normalized_time + ") >= ?";
+        }
+        if (!start.empty() && !end.empty()) {
+            sql += " AND ";
+        }
+        if (!end.empty()) {
+            sql += "(" + normalized_time + ") <= ?";
+        }
+    }
+    sql += " ORDER BY (" + normalized_time + ") DESC, id DESC;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Prepare monitor event query failed: " << sqlite3_errmsg(db_) << std::endl;
+        return {};
+    }
+
+    int param_idx = 1;
+    if (!start.empty()) {
+        sqlite3_bind_text(stmt, param_idx++, start.c_str(), -1, SQLITE_TRANSIENT);
+    }
+    if (!end.empty()) {
+        sqlite3_bind_text(stmt, param_idx++, end.c_str(), -1, SQLITE_TRANSIENT);
+    }
+
+    std::vector<AlertRecord> results;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        AlertRecord r;
+        r.rule_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        r.rule_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        r.severity = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        r.file_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        r.event_type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        r.process_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+        r.pid = sqlite3_column_int(stmt, 6);
+        r.user_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
+        r.uid = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+        r.expected = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+        r.actual = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        r.action_taken = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11));
+        r.dingtalk_sent = sqlite3_column_int(stmt, 12) != 0;
+        r.recorded_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 13));
+        results.push_back(r);
+    }
     sqlite3_finalize(stmt);
     return results;
 }
