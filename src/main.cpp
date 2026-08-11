@@ -18,6 +18,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <fstream>
 
 static volatile bool g_reload = false;
 
@@ -41,6 +42,8 @@ void PrintAlertsUsage() {
     printf("  --today               only show alerts from today\n");
     printf("  --rule=<name>         filter by rule_id/rule_name\n");
     printf("  --rule <name>         same as above\n");
+    printf("  --report_html         output to HTML file instead of screen\n");
+    printf("                        file: /var/log/baseline-guard/alerts-<timestamp>.html\n");
 }
 
 std::string NormalizeTimestamp(const std::string& timestamp) {
@@ -54,6 +57,138 @@ std::string NormalizeTimestamp(const std::string& timestamp) {
     }
 
     return timestamp;
+}
+
+std::string EscapeHtml(const std::string& raw) {
+    std::string out;
+    for (char c : raw) {
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            case '"': out += "&quot;"; break;
+            default: out += c;
+        }
+    }
+    return out;
+}
+
+std::string GetCurrentTimeForHtml() {
+    auto t = std::time(nullptr);
+    auto tm = *std::localtime(&t);
+    std::stringstream ss;
+    ss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+    return ss.str();
+}
+
+// 生成告警历史 HTML 报告
+bool GenerateAlertsHtml(const std::vector<AlertRecord>& records,
+                        const std::string& output_path) {
+    int total = records.size();
+    int dingtalk_sent = 0;
+    int dingtalk_skipped = 0;
+    for (const auto& r : records) {
+        if (r.dingtalk_sent) dingtalk_sent++;
+        else dingtalk_skipped++;
+    }
+
+    std::ofstream fs(output_path);
+    if (!fs.is_open()) {
+        return false;
+    }
+
+    fs << R"(<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>baseline-guard 告警历史报告</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;max-width:1200px;margin:40px auto;padding:0 20px;color:#333}
+h1{color:#1a1a1a;border-bottom:2px solid #dc3545;padding-bottom:10px}
+.summary{display:flex;gap:20px;margin:20px 0}
+.summary-box{flex:1;padding:20px;border-radius:8px;text-align:center}
+.summary-box.total{background:#f6f8fa}
+.summary-box.sent{background:#d4edda;color:#155724}
+.summary-box.skip{background:#fff3cd;color:#856404}
+table{width:100%;border-collapse:collapse;margin:20px 0;font-size:13px}
+th{background:#f6f8fa;padding:12px;text-align:left;border-bottom:2px solid #dfe2e5;font-weight:600;white-space:nowrap}
+td{padding:10px 12px;border-bottom:1px solid #eaecef}
+tr:hover{background:#f6f8fa}
+.status-sent{color:#28a745;font-weight:600}
+.status-skip{color:#fd7e14;font-weight:600}
+.severity-critical{color:#dc3545;font-weight:bold}
+.severity-high{color:#fd7e14;font-weight:bold}
+.severity-medium{color:#ffc107}
+.severity-low{color:#6c757d}
+.footer{margin-top:40px;padding-top:20px;border-top:1px solid #eaecef;color:#666;font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+<h1>🚨 baseline-guard 告警历史报告</h1>
+<p>生成时间：)" << GetCurrentTimeForHtml() << R"(</p>
+<p>主机：)" << EscapeHtml(GetHostname()) << R"(</p>
+
+<div class="summary">
+<div class="summary-box total"><h2>)" << total << R"(</h2><p>告警总数</p></div>
+<div class="summary-box sent"><h2>)" << dingtalk_sent << R"(</h2><p>已推送钉钉</p></div>
+<div class="summary-box skip"><h2>)" << dingtalk_skipped << R"(</h2><p>钉钉节流/未推送</p></div>
+</div>
+
+<table>
+<thead>
+<tr>
+<th>时间</th>
+<th>规则ID</th>
+<th>规则名称</th>
+<th>严重级别</th>
+<th>文件路径</th>
+<th>事件类型</th>
+<th>进程</th>
+<th>预期→实际</th>
+<th>动作</th>
+<th>钉钉推送</th>
+</tr>
+</thead>
+<tbody>
+)";
+
+    for (const auto& r : records) {
+        const std::string timestamp = NormalizeTimestamp(r.recorded_at);
+        const std::string sev_class = "severity-" + r.severity;
+        const std::string push_class = r.dingtalk_sent ? "status-sent" : "status-skip";
+        const std::string push_text = r.dingtalk_sent ? "✓ 已推送" : "✗ 未推送";
+        const std::string details = r.expected.empty() || r.actual.empty()
+            ? "-"
+            : (EscapeHtml(r.expected) + " → " + EscapeHtml(r.actual));
+
+        fs << "<tr>\n";
+        fs << "<td>" << EscapeHtml(timestamp) << "</td>\n";
+        fs << "<td><code>" << EscapeHtml(r.rule_id) << "</code></td>\n";
+        fs << "<td>" << EscapeHtml(r.rule_name) << "</td>\n";
+        fs << "<td class=\"" << sev_class << "\">" << EscapeHtml(r.severity) << "</td>\n";
+        fs << "<td><code>" << EscapeHtml(r.file_path) << "</code></td>\n";
+        fs << "<td>" << EscapeHtml(r.event_type.empty() ? "-" : r.event_type) << "</td>\n";
+        fs << "<td>" << EscapeHtml(r.process_name.empty() ? "-" : r.process_name)
+           << "(pid=" << r.pid << ")</td>\n";
+        fs << "<td>" << details << "</td>\n";
+        fs << "<td>" << EscapeHtml(r.action_taken.empty() ? "-" : r.action_taken) << "</td>\n";
+        fs << "<td class=\"" << push_class << "\">" << push_text << "</td>\n";
+        fs << "</tr>\n";
+    }
+
+    fs << R"(</tbody>
+</table>
+
+<div class="footer">
+<p>由 baseline-guard 自动生成 | https://github.com/xiaobaimao-linux/ebpf-baseline</p>
+</div>
+
+</body>
+</html>
+)";
+
+    fs.close();
+    return true;
 }
 
 void PrintAlerts(const std::vector<AlertRecord>& records) {
@@ -149,6 +284,7 @@ int main(int argc, char* argv[]) {
             cmd = arg;
             int j = i + 1;
             bool today = false;
+            bool report_html = false;
             int limit = 20;
             std::string rule;
             while (j < argc) {
@@ -169,6 +305,8 @@ int main(int argc, char* argv[]) {
                     }
                 } else if (subarg == "--today") {
                     today = true;
+                } else if (subarg == "--report_html") {
+                    report_html = true;
                 } else if (subarg.rfind("--rule=", 0) == 0) {
                     rule = subarg.substr(std::string("--rule=").size());
                 } else if (subarg == "--rule") {
@@ -199,20 +337,29 @@ int main(int argc, char* argv[]) {
             }
 
             auto alerts = db.GetAlerts(rule, limit, today);
-            PrintAlerts(alerts);
+
+            if (report_html) {
+                std::string output_path = "/var/log/baseline-guard/alerts-" + NowString() + ".html";
+                if (GenerateAlertsHtml(alerts, output_path)) {
+                    std::cout << "Alert report generated: " << output_path << std::endl;
+                    std::cout << "Total records: " << alerts.size() << std::endl;
+                } else {
+                    std::cerr << "Failed to generate HTML report." << std::endl;
+                    return 1;
+                }
+            } else {
+                PrintAlerts(alerts);
+            }
             return 0;
         } else if (cmd.empty()) {
             cmd = arg;
         } else {
-            // 当已有命令时，剩余参数忽略处理，避免影响旧格式
             break;
         }
         ++i;
     }
 
-    // 验证
     if (cmd == "alerts") {
-        // alerts 已经在扫描过程中直接处理完毕
         return 0;
     }
 
@@ -226,9 +373,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 1. 初始化日志（仅服务型命令才需要）
     Logger::init("/var/log/baseline-guard");
-
     spdlog::info("[service_start] baseline-guard starting, pid={}", getpid());
 
     Config config;
@@ -243,12 +388,11 @@ int main(int argc, char* argv[]) {
                  config_path,
                  config.rules.size());
 
-    // 打印结果
     printRules(config.rules);
 
     AlertManager alert_mgr;
-    alert_mgr.LoadConfig(config.alert, config.db);  // alert + db 分开配置
-    alert_mgr.SetDB(&db);  // 绑定数据库，所有告警统一落库
+    alert_mgr.LoadConfig(config.alert, config.db);
+    alert_mgr.SetDB(&db);
 
     if (alert_mgr.IsEnabled()) {
         spdlog::info("DingTalk alert enabled, throttle={}s", config.alert.throttle_seconds);
@@ -266,7 +410,6 @@ int main(int argc, char* argv[]) {
         spdlog::info("[service_stop] check mode finished, exit_code={}", ret);
         return ret;
     } else if (cmd == "monitor") {
-        // 注册 SIGHUP 用于配置重载
         signal(SIGHUP, sighup_handler);
         spdlog::info("[service_start] monitor mode started");
 
@@ -288,7 +431,7 @@ int main(int argc, char* argv[]) {
         spdlog::info("[service_stop] monitor mode stopped, exit_code={}", ret);
         return ret;
     } else {
-        spdlog::error("未知命令: {}", cmd);
+        spdlog::error("Unknown command: {}", cmd);
         return 1;
     }
 }
