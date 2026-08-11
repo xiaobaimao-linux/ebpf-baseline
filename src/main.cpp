@@ -1,25 +1,25 @@
+#include "alert_manager.hpp"
 #include "baseline.hpp"
+#include "baseline_db.hpp"
 #include "check.hpp"
+#include "commonfun.hpp"
 #include "config.hpp"
+#include "logger.h"
 #include "monitor.hpp"
 #include "utils.hpp"
-#include "commonfun.hpp"
-#include "logger.h"
-#include "baseline_db.hpp"
-#include "alert_manager.hpp"
 
 #include "spdlog/spdlog.h"
-#include <getopt.h>
-#include <signal.h>
-#include <stdio.h>
-#include <unistd.h>
 #include <algorithm>
 #include <cctype>
-#include <iomanip>
-#include <sstream>
-#include <string>
-#include <fstream>
 #include <ctime>
+#include <fstream>
+#include <getopt.h>
+#include <iomanip>
+#include <signal.h>
+#include <sstream>
+#include <stdio.h>
+#include <string>
+#include <unistd.h>
 
 static volatile bool g_reload = false;
 
@@ -30,9 +30,8 @@ void sighup_handler(int) {
 namespace {
 
 std::string ToUpper(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::toupper(ch));
-    });
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
     return value;
 }
 
@@ -57,28 +56,38 @@ void PrintReportUsage() {
     printf("  baseline-guard report --start 2026-08-01 --end 2026-08-10 -o events.html\n");
 }
 
-std::string NormalizeTimestamp(const std::string& timestamp) {
+std::string NormalizeTimestamp(const std::string &timestamp) {
     if (timestamp.size() >= 19 && timestamp[4] == '-' && timestamp[7] == '-') {
         return timestamp;
     }
 
     if (timestamp.size() >= 17 && timestamp[8] == '-') {
-        return timestamp.substr(0, 4) + "-" + timestamp.substr(4, 2) + "-" + timestamp.substr(6, 2)
-               + " " + timestamp.substr(9, 2) + ":" + timestamp.substr(12, 2) + ":" + timestamp.substr(15, 2);
+        return timestamp.substr(0, 4) + "-" + timestamp.substr(4, 2) + "-" +
+               timestamp.substr(6, 2) + " " + timestamp.substr(9, 2) + ":" +
+               timestamp.substr(12, 2) + ":" + timestamp.substr(15, 2);
     }
 
     return timestamp;
 }
 
-std::string EscapeHtml(const std::string& raw) {
+std::string EscapeHtml(const std::string &raw) {
     std::string out;
     for (char c : raw) {
         switch (c) {
-            case '&': out += "&amp;"; break;
-            case '<': out += "&lt;"; break;
-            case '>': out += "&gt;"; break;
-            case '"': out += "&quot;"; break;
-            default: out += c;
+        case '&':
+            out += "&amp;";
+            break;
+        case '<':
+            out += "&lt;";
+            break;
+        case '>':
+            out += "&gt;";
+            break;
+        case '"':
+            out += "&quot;";
+            break;
+        default:
+            out += c;
         }
     }
     return out;
@@ -92,7 +101,7 @@ std::string GetCurrentTimeForHtml() {
     return ss.str();
 }
 
-bool NormalizeReportTime(const std::string& value, bool end_of_day, std::string& normalized) {
+bool NormalizeReportTime(const std::string &value, bool end_of_day, std::string &normalized) {
     std::string input = value;
     if (input.size() == 10) {
         input += end_of_day ? " 23:59:59" : " 00:00:00";
@@ -133,19 +142,17 @@ bool NormalizeReportTime(const std::string& value, bool end_of_day, std::string&
     return true;
 }
 
-std::string SeverityClass(const std::string& severity) {
-    if (severity == "critical" || severity == "high" ||
-        severity == "medium" || severity == "low") {
+std::string SeverityClass(const std::string &severity) {
+    if (severity == "critical" || severity == "high" || severity == "medium" || severity == "low") {
         return "severity-" + severity;
     }
     return "";
 }
 
 // 生成 monitor 原始事件 HTML 报告
-bool GenerateMonitorEventsHtml(const std::vector<AlertRecord>& records,
-                               const std::string& output_path,
-                               const std::string& start,
-                               const std::string& end) {
+bool GenerateMonitorEventsHtml(const std::vector<AlertRecord> &records,
+                               const std::string &output_path, const std::string &start,
+                               const std::string &end) {
     const int total = static_cast<int>(records.size());
 
     std::ofstream fs(output_path);
@@ -176,13 +183,17 @@ tr:hover{background:#f6f8fa}
 </head>
 <body>
 <h1>baseline-guard monitor 事件报告</h1>
-<p>生成时间：)" << GetCurrentTimeForHtml() << R"(</p>
-<p>主机：)" << EscapeHtml(GetHostname()) << R"(</p>
-<p>筛选范围：)" << EscapeHtml(start.empty() ? "不限" : start)
-       << " — " << EscapeHtml(end.empty() ? "不限" : end) << R"(</p>
+<p>生成时间：)"
+       << GetCurrentTimeForHtml() << R"(</p>
+<p>主机：)"
+       << EscapeHtml(GetHostname()) << R"(</p>
+<p>筛选范围：)"
+       << EscapeHtml(start.empty() ? "不限" : start) << " — "
+       << EscapeHtml(end.empty() ? "不限" : end) << R"(</p>
 
 <div class="summary">
-<div class="summary-box"><h2>)" << total << R"(</h2><p>事件总数</p></div>
+<div class="summary-box"><h2>)"
+       << total << R"(</h2><p>事件总数</p></div>
 </div>
 
 <table>
@@ -203,16 +214,16 @@ tr:hover{background:#f6f8fa}
 <tbody>
 )";
 
-    for (const auto& r : records) {
+    for (const auto &r : records) {
         const std::string timestamp = NormalizeTimestamp(r.recorded_at);
         const std::string sev_class = SeverityClass(r.severity);
         const std::string details = r.expected.empty() || r.actual.empty()
-            ? "-"
-            : (EscapeHtml(r.expected) + " → " + EscapeHtml(r.actual));
-        const std::string process = (r.process_name.empty() ? "-" : EscapeHtml(r.process_name))
-            + " (pid=" + (r.pid > 0 ? std::to_string(r.pid) : "-") + ")";
-        const std::string user = EscapeHtml(r.user_name.empty() ? "-" : r.user_name)
-            + " (uid=" + EscapeHtml(r.uid.empty() ? "-" : r.uid) + ")";
+                                        ? "-"
+                                        : (EscapeHtml(r.expected) + " → " + EscapeHtml(r.actual));
+        const std::string process = (r.process_name.empty() ? "-" : EscapeHtml(r.process_name)) +
+                                    " (pid=" + (r.pid > 0 ? std::to_string(r.pid) : "-") + ")";
+        const std::string user = EscapeHtml(r.user_name.empty() ? "-" : r.user_name) +
+                                 " (uid=" + EscapeHtml(r.uid.empty() ? "-" : r.uid) + ")";
 
         fs << "<tr>\n";
         fs << "<td>" << EscapeHtml(timestamp) << "</td>\n";
@@ -243,63 +254,59 @@ tr:hover{background:#f6f8fa}
     return true;
 }
 
-void PrintAlerts(const std::vector<AlertRecord>& records) {
+void PrintAlerts(const std::vector<AlertRecord> &records) {
     if (records.empty()) {
         std::cout << "No alert records found." << std::endl;
         return;
     }
 
-    for (const auto& record : records) {
+    for (const auto &record : records) {
         const std::string timestamp = NormalizeTimestamp(record.recorded_at);
         const std::string severity = ToUpper(record.severity);
         const std::string rule_name = record.rule_name.empty() ? record.rule_id : record.rule_name;
         const std::string event_desc = record.dingtalk_sent ? "" : "(节流跳过)";
 
-        const std::string process_text = record.process_name.empty()
-            ? "-"
-            : record.process_name;
-        const std::string pid_text = record.pid > 0
-            ? ("pid=" + std::to_string(record.pid))
-            : "pid=-";
-        const std::string user_text = record.user_name.empty()
-            ? (record.uid.empty() ? "-" : record.uid)
-            : record.user_name;
-        const std::string user_uid_text = record.uid.empty()
-            ? "-"
-            : record.uid;
+        const std::string process_text = record.process_name.empty() ? "-" : record.process_name;
+        const std::string pid_text =
+            record.pid > 0 ? ("pid=" + std::to_string(record.pid)) : "pid=-";
+        const std::string user_text =
+            record.user_name.empty() ? (record.uid.empty() ? "-" : record.uid) : record.user_name;
+        const std::string user_uid_text = record.uid.empty() ? "-" : record.uid;
 
         const std::string actual_text = record.actual.empty() ? "-" : record.actual;
         const std::string expected_text = record.expected.empty() ? "-" : record.expected;
-        const std::string details = expected_text == "-" || actual_text == "-"
-            ? "-"
-            : (expected_text + "→" + actual_text);
+        const std::string details =
+            expected_text == "-" || actual_text == "-" ? "-" : (expected_text + "→" + actual_text);
 
-        const std::string push_text = record.dingtalk_sent
-            ? "✓已推送钉钉"
-            : "✗未推送";
+        const std::string push_text = record.dingtalk_sent ? "✓已推送钉钉" : "✗未推送";
 
-        std::cout << std::left
-                  << std::setw(19) << timestamp
-                  << "  [" << std::setw(5) << severity << "]"
-                  << "   " << std::setw(12) << rule_name
-                  << "   " << std::setw(16) << record.file_path
-                  << "   " << std::setw(14) << (record.event_type.empty() ? event_desc : record.event_type)
-                  << "   " << std::setw(16) << (process_text + "(" + pid_text + ")")
-                  << "   " << std::setw(14) << (user_text + "(" + user_uid_text + ")")
-                  << "   " << std::setw(14) << details
-                  << "   " << push_text
-                  << std::endl;
+        std::cout << std::left << std::setw(19) << timestamp << "  [" << std::setw(5) << severity
+                  << "]"
+                  << "   " << std::setw(12) << rule_name << "   " << std::setw(16)
+                  << record.file_path << "   " << std::setw(14)
+                  << (record.event_type.empty() ? event_desc : record.event_type) << "   "
+                  << std::setw(16) << (process_text + "(" + pid_text + ")") << "   "
+                  << std::setw(14) << (user_text + "(" + user_uid_text + ")") << "   "
+                  << std::setw(14) << details << "   " << push_text << std::endl;
     }
 }
 
 } // namespace
 
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
     // 设置全局日志级别（默认是 info，低于它的 debug/trace 不会输出）
     spdlog::set_level(spdlog::level::debug);
 
     // 2. 初始化数据库
     BaselineDB db;
+
+    const char *sql_wal = "PRAGMA journal_mode=WAL;";
+    char *errMsg = nullptr;
+    int rc = sqlite3_exec(db, sql_wal, nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        // 输出警告日志，但是程序可以继续跑
+        spdlog::debug("set sqlite WAL failed!!");
+    }
 
     std::string config_path;
     std::string cmd;
@@ -359,7 +366,8 @@ int main(int argc, char* argv[]) {
                     const std::string value = argv[++j];
                     std::string normalized;
                     if (!NormalizeReportTime(value, subarg == "--end", normalized)) {
-                        fprintf(stderr, "Error: invalid time for %s: %s\n", subarg.c_str(), value.c_str());
+                        fprintf(stderr, "Error: invalid time for %s: %s\n", subarg.c_str(),
+                                value.c_str());
                         return 1;
                     }
                     (subarg == "--start" ? start : end) = normalized;
@@ -421,7 +429,9 @@ int main(int argc, char* argv[]) {
                 } else if (subarg == "--today") {
                     today = true;
                 } else if (subarg == "--report_html") {
-                    fprintf(stderr, "Error: --report_html has moved; use baseline-guard report -o <file>\n");
+                    fprintf(
+                        stderr,
+                        "Error: --report_html has moved; use baseline-guard report -o <file>\n");
                     return 1;
                 } else if (subarg.rfind("--rule=", 0) == 0) {
                     rule = subarg.substr(std::string("--rule=").size());
@@ -434,9 +444,9 @@ int main(int argc, char* argv[]) {
                 } else if (subarg == "-h" || subarg == "--help") {
                     PrintAlertsUsage();
                     return 0;
-                } else if (subarg.size() > 0 && std::all_of(subarg.begin(), subarg.end(), [](unsigned char c) {
-                    return std::isdigit(c);
-                })) {
+                } else if (subarg.size() > 0 &&
+                           std::all_of(subarg.begin(), subarg.end(),
+                                       [](unsigned char c) { return std::isdigit(c); })) {
                     try {
                         const int parsed_limit = std::stoi(subarg);
                         if (parsed_limit > 0) {
@@ -489,8 +499,7 @@ int main(int argc, char* argv[]) {
 
     config = parseYamlFile(config_path);
 
-    spdlog::info("[rules_loaded] config={}, format=yaml, rules={}",
-                 config_path,
+    spdlog::info("[rules_loaded] config={}, format=yaml, rules={}", config_path,
                  config.rules.size());
 
     printRules(config.rules);
@@ -504,8 +513,8 @@ int main(int argc, char* argv[]) {
     } else {
         spdlog::warn("DingTalk alert NOT configured (alerts will still be persisted to DB)");
     }
-    spdlog::info("Alert retention: {} days, max {} records",
-                 config.db.retention_days, config.db.retention_max_records);
+    spdlog::info("Alert retention: {} days, max {} records", config.db.retention_days,
+                 config.db.retention_max_records);
 
     compute_inodes(config);
 
