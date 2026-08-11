@@ -13,5 +13,9 @@
     "make": true,
     "./test_config": true,
     "./baseline-guard": true
-  }
+  },
+  "claudeCode.environmentVariables": [
+  { "name": "ANTHROPIC_BASE_URL", "value": "http://127.0.0.1:3000" },
+  { "name": "ANTHROPIC_AUTH_TOKEN", "value": "proxy-placeholder" }
+]
 }
