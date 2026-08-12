@@ -34,6 +34,13 @@ struct ListEntry : SnapshotEntry {
     std::string recorded_at;
 };
 
+// check / clean 子命令使用的完整条目（含快照元信息）
+struct CheckEntry : SnapshotEntry {
+    std::string snapshot_id;
+    std::string label;
+    std::string recorded_at;
+};
+
 // list 查询结果：entries 为当前页数据，total_count 为过滤后总行数
 struct ListResult {
     std::vector<ListEntry> entries;
@@ -135,14 +142,19 @@ public:
                                                const std::string& end = "");
 
     // 删除基线条目：paths 中的每个路径精确匹配；recursive=true 时目录路径启用前缀匹配
+    // source_label 用于审计记录的来源标识
     // 返回实际删除的条目数
-    int DeleteBaselineEntries(const std::vector<std::string>& paths, bool recursive);
+    int DeleteBaselineEntries(const std::vector<std::string>& paths, bool recursive,
+                              const std::string& source_label = "manual-delete");
 
     // 分页查询 baseline_entries：path_filter 使用 SQL LIKE 语法，limit/offset 控制分页
     // 返回 entries（当前页）和 total_count（过滤后总行数）
     ListResult ListBaselineEntries(const std::string& path_filter,
                                    int limit,
                                    int offset);
+
+    // 获取全部基线条目（含快照元信息），用于 check / clean 子命令
+    std::vector<CheckEntry> GetAllBaselineEntries();
 
 private:
     sqlite3* db_ = nullptr;

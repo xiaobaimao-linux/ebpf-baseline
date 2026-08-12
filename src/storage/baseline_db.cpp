@@ -807,7 +807,8 @@ std::vector<AlertRecord> BaselineDB::GetMonitorEvents(const std::string& start,
 }
 
 // 删除基线条目：精确匹配 + 可选递归前缀匹配，并写入审计记录
-int BaselineDB::DeleteBaselineEntries(const std::vector<std::string>& paths, bool recursive) {
+int BaselineDB::DeleteBaselineEntries(const std::vector<std::string>& paths, bool recursive,
+                                      const std::string& source_label) {
     if (paths.empty()) {
         return 0;
     }
@@ -915,8 +916,8 @@ int BaselineDB::DeleteBaselineEntries(const std::vector<std::string>& paths, boo
         sqlite3_reset(audit_stmt);
         sqlite3_clear_bindings(audit_stmt);
         int idx = 1;
-        sqlite3_bind_text(audit_stmt, idx++, "manual-delete", -1, SQLITE_STATIC);
-        sqlite3_bind_text(audit_stmt, idx++, "manual-delete", -1, SQLITE_STATIC);
+        sqlite3_bind_text(audit_stmt, idx++, source_label.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(audit_stmt, idx++, source_label.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(audit_stmt, idx++, entry.file_path.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(audit_stmt, idx++, "delete", -1, SQLITE_STATIC);
         // old_* 字段
@@ -1062,4 +1063,40 @@ ListResult BaselineDB::ListBaselineEntries(const std::string& path_filter,
     sqlite3_finalize(stmt);
 
     return result;
+}
+
+// 获取全部基线条目（含快照元信息）
+std::vector<CheckEntry> BaselineDB::GetAllBaselineEntries() {
+    std::vector<CheckEntry> results;
+    const char* sql = "SELECT file_path, file_type, hash, permission, uid, gid, owner, grp, "
+                      "file_size, mtime, snapshot_id, label, recorded_at "
+                      "FROM baseline_entries ORDER BY file_path;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        spdlog::error("GetAllBaselineEntries: prepare failed: {}", sqlite3_errmsg(db_));
+        return results;
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        CheckEntry entry;
+        entry.file_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        entry.file_type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        entry.hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        entry.permission = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        entry.uid = sqlite3_column_int64(stmt, 4);
+        entry.gid = sqlite3_column_int64(stmt, 5);
+        const auto* owner = sqlite3_column_text(stmt, 6);
+        const auto* grp = sqlite3_column_text(stmt, 7);
+        entry.owner = owner != nullptr ? reinterpret_cast<const char*>(owner) : "";
+        entry.grp = grp != nullptr ? reinterpret_cast<const char*>(grp) : "";
+        entry.file_size = sqlite3_column_int64(stmt, 8);
+        entry.mtime = sqlite3_column_int64(stmt, 9);
+        entry.snapshot_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        entry.label = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11));
+        entry.recorded_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 12));
+        results.push_back(std::move(entry));
+    }
+    sqlite3_finalize(stmt);
+    return results;
 }

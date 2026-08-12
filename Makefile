@@ -30,6 +30,8 @@ BPF_SKEL = bpf/lsm_file.skel.h
 # 用户态源文件
 MAIN_SRCS = src/main.cpp \
             src/alerts/alert_manager.cpp \
+            src/baseline/baseline_check.cpp \
+            src/baseline/baseline_clean.cpp \
             src/baseline/baseline_delete.cpp \
             src/baseline/baseline_list.cpp \
             src/baseline/baseline_snapshot.cpp \

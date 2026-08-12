@@ -1,5 +1,7 @@
 #include "alert_manager.hpp"
 #include "baseline.hpp"
+#include "baseline_check.hpp"
+#include "baseline_clean.hpp"
 #include "baseline_delete.hpp"
 #include "baseline_list.hpp"
 #include "baseline_snapshot.hpp"
@@ -170,10 +172,10 @@ void PrintAlerts(const std::vector<AlertRecord> &records) {
 } // namespace
 
 int main(int argc, char *argv[]) {
-    // baseline snapshot / delete / list 使用独立参数解析，并在解析 --db 后再初始化数据库。
+    // baseline snapshot / delete / list / check / clean 使用独立参数解析，并在解析 --db 后再初始化数据库。
     if (argc >= 2 && std::string(argv[1]) == "baseline") {
         if (argc < 3) {
-            fprintf(stderr, "Error: baseline subcommand required (snapshot, delete, list)\n");
+            fprintf(stderr, "Error: baseline subcommand required (snapshot, delete, list, check, clean)\n");
             return 2;
         }
         std::string subcmd = argv[2];
@@ -183,6 +185,10 @@ int main(int argc, char *argv[]) {
             return RunBaselineDelete(argc - 3, argv + 3);
         } else if (subcmd == "list") {
             return RunBaselineList(argc - 3, argv + 3);
+        } else if (subcmd == "check") {
+            return RunBaselineCheck(argc - 3, argv + 3);
+        } else if (subcmd == "clean") {
+            return RunBaselineClean(argc - 3, argv + 3);
         } else {
             fprintf(stderr, "Error: unknown baseline subcommand: %s\n", subcmd.c_str());
             return 2;
@@ -221,6 +227,8 @@ int main(int argc, char *argv[]) {
             printf("  baseline snapshot     create or update file baselines\n");
             printf("  baseline delete       delete file baseline entries\n");
             printf("  baseline list         list file baseline entries\n");
+            printf("  baseline check        check baseline integrity against disk\n");
+            printf("  baseline clean        clean orphan baseline entries\n");
             printf("  alerts                show alert history from SQLite\n");
             printf("  report                export monitor events to HTML\n");
             return 0;
