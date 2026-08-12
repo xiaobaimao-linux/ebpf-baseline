@@ -5,6 +5,7 @@ BPF_CC = clang
 INCLUDE_DIRS = -I./include \
                -I./src \
                -I./src/alerts \
+               -I./src/baseline \
                -I./src/check \
                -I./src/cli \
                -I./src/common \
@@ -29,6 +30,7 @@ BPF_SKEL = bpf/lsm_file.skel.h
 # 用户态源文件
 MAIN_SRCS = src/main.cpp \
             src/alerts/alert_manager.cpp \
+            src/baseline/baseline_snapshot.cpp \
             src/check/check.cpp \
             src/cli/config.cpp \
             src/common/commonfun.cpp \
@@ -40,7 +42,7 @@ MONITOR_SRC = src/monitor/monitor.cpp
 OBJS = $(MAIN_SRCS:.cpp=.o) $(MONITOR_SRC:.cpp=.o)
 DEPS = $(OBJS:.o=.d)
 
-.PHONY: all clean test test-monitor
+.PHONY: all clean test test-monitor test-snapshot
 
 all: $(TARGET)
 
@@ -68,6 +70,9 @@ test: $(TARGET)
 
 test-monitor: $(TARGET)
 	sudo timeout 5 ./$(TARGET) monitor -c tests/fixtures/default.yaml || true
+
+test-snapshot: $(TARGET)
+	bash tests/integration/test_snapshot.sh
 
 clean:
 	find src -type f \( -name '*.o' -o -name '*.d' \) -delete

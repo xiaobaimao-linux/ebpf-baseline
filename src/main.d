@@ -1,6 +1,7 @@
 src/main.o: src/main.cpp src/alerts/alert_manager.hpp \
  src/common/nlohmann/json.hpp src/storage/baseline_db.hpp \
- src/cli/config.hpp src/cli/baseline.hpp bpf/event.h src/check/check.hpp \
+ src/cli/config.hpp src/cli/baseline.hpp bpf/event.h \
+ src/baseline/baseline_snapshot.hpp src/check/check.hpp \
  src/common/commonfun.hpp src/common/logger.h src/common/spdlog/spdlog.h \
  src/common/spdlog/common.h src/common/spdlog/tweakme.h \
  src/common/spdlog/details/null_mutex.h src/common/spdlog/fmt/fmt.h \
@@ -41,6 +42,7 @@ src/storage/baseline_db.hpp:
 src/cli/config.hpp:
 src/cli/baseline.hpp:
 bpf/event.h:
+src/baseline/baseline_snapshot.hpp:
 src/check/check.hpp:
 src/common/commonfun.hpp:
 src/common/logger.h:

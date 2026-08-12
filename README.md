@@ -96,7 +96,51 @@ $ ./baseline-guard check -c rules.yaml
 
 ------
 
-### 模块3：运行时 eBPF LSM 监控（monitor 模式）
+### 模块2：静态基线核查（check 模式）
+
+一次性扫描系统，对照 YAML 基线输出合规状态。
+
+```
+$ ./baseline-guard check -c rules.yaml
+
+[SYS-PERM-001] /etc/passwd
+  ✓ PASS: mode 0644 (expected 0644)
+
+[SYS-HASH-001] /usr/bin/sshd
+  ✓ PASS: mode 0644 (expected 0644)
+  ✓ PASS: sha256 matches
+
+[SYS-COMBO-001] /home/sf/combo.txt
+  ✗ FAIL: mode 0777 (expected 0644)
+  ✓ PASS: sha256 matches
+
+合规评分：75/100
+```
+
+### 模块3：基线快照（baseline snapshot）
+
+`baseline snapshot` 是不依赖 YAML 规则的底层基线采集命令，直接扫描一个或多个文件/目录，并将当前文件状态写入 SQLite。目录默认递归扫描；每个文件在 `baseline_entries` 中只保留一条当前生效记录，实际新增、修改和删除会记录到 `baseline_audit`。
+
+```bash
+./baseline-guard baseline snapshot /etc /usr/bin \
+  --db /var/lib/baseline-guard/baseline.db \
+  --label release-2026-08-12 \
+  --exclude /etc/cache
+```
+
+支持的选项：
+
+- `PATH...`：至少一个文件或目录，可指定多个。
+- `--db PATH`：指定 SQLite 数据库，默认 `/var/lib/baseline-guard/baseline.db`。
+- `--label NAME`：本次快照标签，默认 `default`。
+- `--exclude PATH`：单次扫描临时排除路径，可重复使用，不会修改全局白名单。
+- `--no-recurse`：目录只扫描直接子文件，不进入下级目录。
+
+重复执行相同快照不会产生新的审计变更；文件内容、权限、属主或元数据发生变化时会产生 `modified` 记录。只扫描部分目录时，只会处理当前扫描作用域中的删除，不会影响其他目录的基线。
+
+------
+
+### 模块4：运行时 eBPF LSM 监控（monitor 模式）
 
 持续监控系统运行时状态，检测基线偏离。
 

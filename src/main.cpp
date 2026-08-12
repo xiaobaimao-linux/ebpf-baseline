@@ -1,5 +1,6 @@
 #include "alert_manager.hpp"
 #include "baseline.hpp"
+#include "baseline_snapshot.hpp"
 #include "baseline_db.hpp"
 #include "check.hpp"
 #include "commonfun.hpp"
@@ -167,6 +168,15 @@ void PrintAlerts(const std::vector<AlertRecord> &records) {
 } // namespace
 
 int main(int argc, char *argv[]) {
+    // baseline snapshot 使用独立参数解析，并在解析 --db 后再初始化数据库。
+    if (argc >= 2 && std::string(argv[1]) == "baseline") {
+        if (argc < 3 || std::string(argv[2]) != "snapshot") {
+            fprintf(stderr, "Error: baseline subcommand required (snapshot)\n");
+            return 2;
+        }
+        return RunBaselineSnapshot(argc - 3, argv + 3);
+    }
+
     // 设置全局日志级别（默认是 info，低于它的 debug/trace 不会输出）
     spdlog::set_level(spdlog::level::debug);
 
@@ -196,6 +206,7 @@ int main(int argc, char *argv[]) {
             printf("Commands:\n");
             printf("  --check               check baseline\n");
             printf("  --monitor             monitor baseline\n");
+            printf("  baseline snapshot     create or update file baselines\n");
             printf("  alerts                show alert history from SQLite\n");
             printf("  report                export monitor events to HTML\n");
             return 0;
