@@ -34,7 +34,7 @@ src/main.o: src/main.cpp src/alerts/alert_manager.hpp \
  src/common/spdlog/sinks/rotating_file_sink-inl.h \
  src/common/spdlog/sinks/stdout_color_sinks.h \
  src/common/spdlog/sinks/stdout_color_sinks-inl.h src/monitor/monitor.hpp \
- src/common/utils.hpp
+ src/common/utils.hpp src/report/report_generator.hpp
 src/alerts/alert_manager.hpp:
 src/common/nlohmann/json.hpp:
 src/storage/baseline_db.hpp:
@@ -87,3 +87,4 @@ src/common/spdlog/sinks/stdout_color_sinks.h:
 src/common/spdlog/sinks/stdout_color_sinks-inl.h:
 src/monitor/monitor.hpp:
 src/common/utils.hpp:
+src/report/report_generator.hpp:

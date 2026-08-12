@@ -7,6 +7,8 @@
 #include "logger.h"
 #include "monitor.hpp"
 #include "utils.hpp"
+#include "report_generator.hpp"
+
 
 #include "spdlog/spdlog.h"
 #include <algorithm>
@@ -56,19 +58,7 @@ void PrintReportUsage() {
     printf("  baseline-guard report --start 2026-08-01 --end 2026-08-10 -o events.html\n");
 }
 
-std::string NormalizeTimestamp(const std::string &timestamp) {
-    if (timestamp.size() >= 19 && timestamp[4] == '-' && timestamp[7] == '-') {
-        return timestamp;
-    }
 
-    if (timestamp.size() >= 17 && timestamp[8] == '-') {
-        return timestamp.substr(0, 4) + "-" + timestamp.substr(4, 2) + "-" +
-               timestamp.substr(6, 2) + " " + timestamp.substr(9, 2) + ":" +
-               timestamp.substr(12, 2) + ":" + timestamp.substr(15, 2);
-    }
-
-    return timestamp;
-}
 
 std::string EscapeHtml(const std::string &raw) {
     std::string out;
@@ -93,13 +83,7 @@ std::string EscapeHtml(const std::string &raw) {
     return out;
 }
 
-std::string GetCurrentTimeForHtml() {
-    auto t = std::time(nullptr);
-    auto tm = *std::localtime(&t);
-    std::stringstream ss;
-    ss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
-    return ss.str();
-}
+
 
 bool NormalizeReportTime(const std::string &value, bool end_of_day, std::string &normalized) {
     std::string input = value;
@@ -142,117 +126,6 @@ bool NormalizeReportTime(const std::string &value, bool end_of_day, std::string 
     return true;
 }
 
-std::string SeverityClass(const std::string &severity) {
-    if (severity == "critical" || severity == "high" || severity == "medium" || severity == "low") {
-        return "severity-" + severity;
-    }
-    return "";
-}
-
-// 生成 monitor 原始事件 HTML 报告
-bool GenerateMonitorEventsHtml(const std::vector<AlertRecord> &records,
-                               const std::string &output_path, const std::string &start,
-                               const std::string &end) {
-    const int total = static_cast<int>(records.size());
-
-    std::ofstream fs(output_path);
-    if (!fs.is_open()) {
-        return false;
-    }
-
-    fs << R"(<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>baseline-guard monitor 事件报告</title>
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;max-width:1400px;margin:40px auto;padding:0 20px;color:#333}
-h1{color:#1a1a1a;border-bottom:2px solid #dc3545;padding-bottom:10px}
-.summary{display:flex;gap:20px;margin:20px 0}
-.summary-box{padding:20px 40px;border-radius:8px;text-align:center;background:#f6f8fa}
-table{width:100%;border-collapse:collapse;margin:20px 0;font-size:13px}
-th{background:#f6f8fa;padding:12px;text-align:left;border-bottom:2px solid #dfe2e5;font-weight:600;white-space:nowrap}
-td{padding:10px 12px;border-bottom:1px solid #eaecef}
-tr:hover{background:#f6f8fa}
-.severity-critical{color:#dc3545;font-weight:bold}
-.severity-high{color:#fd7e14;font-weight:bold}
-.severity-medium{color:#b8860b}
-.severity-low{color:#6c757d}
-.footer{margin-top:40px;padding-top:20px;border-top:1px solid #eaecef;color:#666;font-size:12px;text-align:center}
-</style>
-</head>
-<body>
-<h1>baseline-guard monitor 事件报告</h1>
-<p>生成时间：)"
-       << GetCurrentTimeForHtml() << R"(</p>
-<p>主机：)"
-       << EscapeHtml(GetHostname()) << R"(</p>
-<p>筛选范围：)"
-       << EscapeHtml(start.empty() ? "不限" : start) << " — "
-       << EscapeHtml(end.empty() ? "不限" : end) << R"(</p>
-
-<div class="summary">
-<div class="summary-box"><h2>)"
-       << total << R"(</h2><p>事件总数</p></div>
-</div>
-
-<table>
-<thead>
-<tr>
-<th>时间</th>
-<th>规则ID</th>
-<th>规则名称</th>
-<th>严重级别</th>
-<th>文件路径</th>
-<th>事件类型</th>
-<th>进程/PID</th>
-<th>用户/UID</th>
-<th>预期→实际</th>
-<th>动作</th>
-</tr>
-</thead>
-<tbody>
-)";
-
-    for (const auto &r : records) {
-        const std::string timestamp = NormalizeTimestamp(r.recorded_at);
-        const std::string sev_class = SeverityClass(r.severity);
-        const std::string details = r.expected.empty() || r.actual.empty()
-                                        ? "-"
-                                        : (EscapeHtml(r.expected) + " → " + EscapeHtml(r.actual));
-        const std::string process = (r.process_name.empty() ? "-" : EscapeHtml(r.process_name)) +
-                                    " (pid=" + (r.pid > 0 ? std::to_string(r.pid) : "-") + ")";
-        const std::string user = EscapeHtml(r.user_name.empty() ? "-" : r.user_name) +
-                                 " (uid=" + EscapeHtml(r.uid.empty() ? "-" : r.uid) + ")";
-
-        fs << "<tr>\n";
-        fs << "<td>" << EscapeHtml(timestamp) << "</td>\n";
-        fs << "<td><code>" << EscapeHtml(r.rule_id) << "</code></td>\n";
-        fs << "<td>" << EscapeHtml(r.rule_name.empty() ? "-" : r.rule_name) << "</td>\n";
-        fs << "<td class=\"" << sev_class << "\">" << EscapeHtml(r.severity) << "</td>\n";
-        fs << "<td><code>" << EscapeHtml(r.file_path) << "</code></td>\n";
-        fs << "<td>" << EscapeHtml(r.event_type.empty() ? "-" : r.event_type) << "</td>\n";
-        fs << "<td>" << process << "</td>\n";
-        fs << "<td>" << user << "</td>\n";
-        fs << "<td>" << details << "</td>\n";
-        fs << "<td>" << EscapeHtml(r.action_taken.empty() ? "-" : r.action_taken) << "</td>\n";
-        fs << "</tr>\n";
-    }
-
-    fs << R"(</tbody>
-</table>
-
-<div class="footer">
-<p>由 baseline-guard 自动生成 | https://github.com/xiaobaimao-linux/ebpf-baseline</p>
-</div>
-
-</body>
-</html>
-)";
-
-    fs.close();
-    return true;
-}
 
 void PrintAlerts(const std::vector<AlertRecord> &records) {
     if (records.empty()) {
@@ -389,7 +262,8 @@ int main(int argc, char *argv[]) {
             }
 
             const auto events = db.GetMonitorEvents(start, end);
-            if (!GenerateMonitorEventsHtml(events, output_path, start, end)) {
+            ReportGenerator rg;
+            if (!rg.GenerateMonitorEventsHtml(events, output_path, start, end)) {
                 fprintf(stderr, "Error: failed to generate HTML report: %s\n", output_path.c_str());
                 return 1;
             }

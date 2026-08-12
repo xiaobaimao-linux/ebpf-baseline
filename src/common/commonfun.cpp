@@ -34,3 +34,25 @@ std::string GetHostname() {
     
     return "unknown";
 }
+
+std::string NormalizeTimestamp(const std::string &timestamp) {
+    if (timestamp.size() >= 19 && timestamp[4] == '-' && timestamp[7] == '-') {
+        return timestamp;
+    }
+
+    if (timestamp.size() >= 17 && timestamp[8] == '-') {
+        return timestamp.substr(0, 4) + "-" + timestamp.substr(4, 2) + "-" +
+               timestamp.substr(6, 2) + " " + timestamp.substr(9, 2) + ":" +
+               timestamp.substr(12, 2) + ":" + timestamp.substr(15, 2);
+    }
+
+    return timestamp;
+}
+
+
+std::string SeverityClass(const std::string &severity) {
+    if (severity == "critical" || severity == "high" || severity == "medium" || severity == "low") {
+        return "severity-" + severity;
+    }
+    return "";
+}
