@@ -121,6 +121,10 @@ public:
     std::vector<AlertRecord> GetMonitorEvents(const std::string& start = "",
                                                const std::string& end = "");
 
+    // 删除基线条目：paths 中的每个路径精确匹配；recursive=true 时目录路径启用前缀匹配
+    // 返回实际删除的条目数
+    int DeleteBaselineEntries(const std::vector<std::string>& paths, bool recursive);
+
 private:
     sqlite3* db_ = nullptr;
 
