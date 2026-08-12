@@ -15,8 +15,8 @@ struct CheckResult {
 
 class ReportGenerator {
 public:
-    bool GenerateHtml(const std::vector<CheckResult>& results,
-                      const std::string& output_path);
+    bool GenerateCheckHtml(const std::vector<CheckResult>& results,
+                           const std::string& output_path);
     
 private:
     std::string EscapeHtml(const std::string& raw);

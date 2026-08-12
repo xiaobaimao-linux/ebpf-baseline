@@ -28,8 +28,8 @@ std::string ReportGenerator::GetCurrentTime() {
     return ss.str();
 }
 
-bool ReportGenerator::GenerateHtml(const std::vector<CheckResult>& results,
-                                   const std::string& output_path) {
+bool ReportGenerator::GenerateCheckHtml(const std::vector<CheckResult>& results,
+                                        const std::string& output_path) {
     int total = results.size();
     int passed = std::count_if(results.begin(), results.end(),
                                [](const auto& r) { return r.passed; });

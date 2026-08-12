@@ -198,7 +198,7 @@ int do_check(const Config& config, BaselineDB& db) {
      // 生成报告
     std::string report_path = "/var/log/baseline-guard/report-" + NowString() + ".html";
     ReportGenerator gen;
-    if (gen.GenerateHtml(results, report_path)) {
+    if (gen.GenerateCheckHtml(results, report_path)) {
         spdlog::info("Report generated: {}", report_path);
     }
 
