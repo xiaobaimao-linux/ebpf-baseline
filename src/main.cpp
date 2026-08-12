@@ -1,6 +1,7 @@
 #include "alert_manager.hpp"
 #include "baseline.hpp"
 #include "baseline_delete.hpp"
+#include "baseline_list.hpp"
 #include "baseline_snapshot.hpp"
 #include "baseline_db.hpp"
 #include "check.hpp"
@@ -169,10 +170,10 @@ void PrintAlerts(const std::vector<AlertRecord> &records) {
 } // namespace
 
 int main(int argc, char *argv[]) {
-    // baseline snapshot / delete 使用独立参数解析，并在解析 --db 后再初始化数据库。
+    // baseline snapshot / delete / list 使用独立参数解析，并在解析 --db 后再初始化数据库。
     if (argc >= 2 && std::string(argv[1]) == "baseline") {
         if (argc < 3) {
-            fprintf(stderr, "Error: baseline subcommand required (snapshot, delete)\n");
+            fprintf(stderr, "Error: baseline subcommand required (snapshot, delete, list)\n");
             return 2;
         }
         std::string subcmd = argv[2];
@@ -180,6 +181,8 @@ int main(int argc, char *argv[]) {
             return RunBaselineSnapshot(argc - 3, argv + 3);
         } else if (subcmd == "delete") {
             return RunBaselineDelete(argc - 3, argv + 3);
+        } else if (subcmd == "list") {
+            return RunBaselineList(argc - 3, argv + 3);
         } else {
             fprintf(stderr, "Error: unknown baseline subcommand: %s\n", subcmd.c_str());
             return 2;
@@ -217,6 +220,7 @@ int main(int argc, char *argv[]) {
             printf("  --monitor             monitor baseline\n");
             printf("  baseline snapshot     create or update file baselines\n");
             printf("  baseline delete       delete file baseline entries\n");
+            printf("  baseline list         list file baseline entries\n");
             printf("  alerts                show alert history from SQLite\n");
             printf("  report                export monitor events to HTML\n");
             return 0;

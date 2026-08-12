@@ -31,6 +31,7 @@ BPF_SKEL = bpf/lsm_file.skel.h
 MAIN_SRCS = src/main.cpp \
             src/alerts/alert_manager.cpp \
             src/baseline/baseline_delete.cpp \
+            src/baseline/baseline_list.cpp \
             src/baseline/baseline_snapshot.cpp \
             src/check/check.cpp \
             src/cli/config.cpp \

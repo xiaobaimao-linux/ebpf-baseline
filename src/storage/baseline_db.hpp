@@ -27,6 +27,19 @@ struct SnapshotEntry {
     std::int64_t mtime = 0;
 };
 
+// list 子命令使用的扩展条目（含快照元信息）
+struct ListEntry : SnapshotEntry {
+    std::string snapshot_id;
+    std::string label;
+    std::string recorded_at;
+};
+
+// list 查询结果：entries 为当前页数据，total_count 为过滤后总行数
+struct ListResult {
+    std::vector<ListEntry> entries;
+    std::int64_t total_count = 0;
+};
+
 struct SnapshotScope {
     std::string path;
     bool recursive = true;
@@ -124,6 +137,12 @@ public:
     // 删除基线条目：paths 中的每个路径精确匹配；recursive=true 时目录路径启用前缀匹配
     // 返回实际删除的条目数
     int DeleteBaselineEntries(const std::vector<std::string>& paths, bool recursive);
+
+    // 分页查询 baseline_entries：path_filter 使用 SQL LIKE 语法，limit/offset 控制分页
+    // 返回 entries（当前页）和 total_count（过滤后总行数）
+    ListResult ListBaselineEntries(const std::string& path_filter,
+                                   int limit,
+                                   int offset);
 
 private:
     sqlite3* db_ = nullptr;

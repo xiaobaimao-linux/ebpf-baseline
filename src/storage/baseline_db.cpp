@@ -976,3 +976,90 @@ int BaselineDB::DeleteBaselineEntries(const std::vector<std::string>& paths, boo
 
     return deleted_count;
 }
+
+// 分页查询 baseline_entries
+ListResult BaselineDB::ListBaselineEntries(const std::string& path_filter,
+                                            int limit,
+                                            int offset) {
+    ListResult result;
+
+    // 1. 查询总数
+    std::string count_sql = "SELECT COUNT(*) FROM baseline_entries";
+    if (!path_filter.empty()) {
+        count_sql += " WHERE file_path LIKE ?";
+    }
+    count_sql += ";";
+
+    sqlite3_stmt* count_stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, count_sql.c_str(), -1, &count_stmt, nullptr) != SQLITE_OK) {
+        spdlog::error("ListBaselineEntries: count prepare failed: {}", sqlite3_errmsg(db_));
+        return result;
+    }
+    if (!path_filter.empty()) {
+        sqlite3_bind_text(count_stmt, 1, path_filter.c_str(), -1, SQLITE_STATIC);
+    }
+    if (sqlite3_step(count_stmt) == SQLITE_ROW) {
+        result.total_count = sqlite3_column_int64(count_stmt, 0);
+    }
+    sqlite3_finalize(count_stmt);
+
+    if (result.total_count == 0) {
+        return result;
+    }
+
+    // 2. 查询当前页数据
+    std::string sql = "SELECT file_path, file_type, hash, permission, uid, gid, owner, grp, "
+                      "file_size, mtime, snapshot_id, label, recorded_at "
+                      "FROM baseline_entries";
+    if (!path_filter.empty()) {
+        sql += " WHERE file_path LIKE ?";
+    }
+    sql += " ORDER BY file_path";
+    if (limit > 0) {
+        sql += " LIMIT ?";
+    }
+    if (offset > 0) {
+        sql += " OFFSET ?";
+    }
+    sql += ";";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        spdlog::error("ListBaselineEntries: query prepare failed: {}", sqlite3_errmsg(db_));
+        return result;
+    }
+
+    int param_idx = 1;
+    if (!path_filter.empty()) {
+        sqlite3_bind_text(stmt, param_idx++, path_filter.c_str(), -1, SQLITE_STATIC);
+    }
+    if (limit > 0) {
+        sqlite3_bind_int(stmt, param_idx++, limit);
+    }
+    if (offset > 0) {
+        sqlite3_bind_int(stmt, param_idx++, offset);
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        ListEntry entry;
+        entry.file_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        entry.file_type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        entry.hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        entry.permission = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        entry.uid = sqlite3_column_int64(stmt, 4);
+        entry.gid = sqlite3_column_int64(stmt, 5);
+        const auto* owner = sqlite3_column_text(stmt, 6);
+        const auto* grp = sqlite3_column_text(stmt, 7);
+        entry.owner = owner != nullptr ? reinterpret_cast<const char*>(owner) : "";
+        entry.grp = grp != nullptr ? reinterpret_cast<const char*>(grp) : "";
+        entry.file_size = sqlite3_column_int64(stmt, 8);
+        entry.mtime = sqlite3_column_int64(stmt, 9);
+        entry.snapshot_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        entry.label = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11));
+        entry.recorded_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 12));
+        result.entries.push_back(std::move(entry));
+    }
+    sqlite3_finalize(stmt);
+
+    return result;
+}
