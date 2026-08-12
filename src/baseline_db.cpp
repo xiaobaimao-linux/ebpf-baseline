@@ -1,6 +1,7 @@
 #include "baseline_db.hpp"
 
-#include <iostream>
+#include <spdlog/spdlog.h>
+
 #include <sqlite3.h>
 #include <stdexcept>
 #include <string>
@@ -17,7 +18,20 @@ BaselineDB::BaselineDB(const std::string &db_path) {
     if (sqlite3_open(db_path.c_str(), &db_) != SQLITE_OK) {
         throw std::runtime_error("Failed to open database: " + std::string(sqlite3_errmsg(db_)));
     }
+
+    setWAL();
     InitTable();
+}
+
+void BaselineDB::setWAL() {
+    const char *sql_wal = "PRAGMA journal_mode=WAL;";
+    char *err_msg = nullptr;
+    const int rc = sqlite3_exec(db_, sql_wal, nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        // 输出警告日志，但是程序可以继续跑
+        spdlog::debug("set sqlite WAL failed: {}", err_msg != nullptr ? err_msg : sqlite3_errmsg(db_));
+    }
+    sqlite3_free(err_msg);
 }
 
 BaselineDB::~BaselineDB() {
@@ -43,7 +57,7 @@ void BaselineDB::SaveBaseline(const BaselineRecord &record) {
     sqlite3_bind_text(stmt, 6, record.recorded_at.c_str(), -1, SQLITE_STATIC);
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
-        std::cerr << "Save baseline failed: " << sqlite3_errmsg(db_) << std::endl;
+        spdlog::error("Save baseline failed: {}", sqlite3_errmsg(db_));
     }
     sqlite3_finalize(stmt);
 }
@@ -77,10 +91,10 @@ void BaselineDB::SaveAlert(const AlertRecord &record) {
     sqlite3_bind_text(stmt, 14, record.recorded_at.c_str(), -1, SQLITE_STATIC);
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
-        std::cerr << "Save alert failed: " << sqlite3_errmsg(db_) << std::endl;
+        spdlog::error("Save alert failed: {}", sqlite3_errmsg(db_));
     } else {
-        std::cout << "[DB] Alert saved: " << record.rule_id << " | " << record.file_path << " | "
-                  << record.recorded_at << std::endl;
+        spdlog::info("[DB] Alert saved: {} | {} | {}", record.rule_id, record.file_path,
+                     record.recorded_at);
     }
     sqlite3_finalize(stmt);
 }
@@ -313,7 +327,7 @@ std::vector<AlertRecord> BaselineDB::GetMonitorEvents(const std::string& start,
 
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "Prepare monitor event query failed: " << sqlite3_errmsg(db_) << std::endl;
+        spdlog::error("Prepare monitor event query failed: {}", sqlite3_errmsg(db_));
         return {};
     }
 

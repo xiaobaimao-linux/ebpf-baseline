@@ -38,6 +38,9 @@ public:
 
     ~BaselineDB();
 
+    // 设置 SQLite WAL 日志模式
+    void setWAL();
+
     // 保存或更新基线
     void SaveBaseline(const BaselineRecord& record);
 

@@ -300,14 +300,6 @@ int main(int argc, char *argv[]) {
     // 2. 初始化数据库
     BaselineDB db;
 
-    const char *sql_wal = "PRAGMA journal_mode=WAL;";
-    char *errMsg = nullptr;
-    int rc = sqlite3_exec(db, sql_wal, nullptr, nullptr, &errMsg);
-    if (rc != SQLITE_OK) {
-        // 输出警告日志，但是程序可以继续跑
-        spdlog::debug("set sqlite WAL failed!!");
-    }
-
     std::string config_path;
     std::string cmd;
 
