@@ -1100,3 +1100,38 @@ std::vector<CheckEntry> BaselineDB::GetAllBaselineEntries() {
     sqlite3_finalize(stmt);
     return results;
 }
+
+// 查询单条基线条目（按 file_path 精确匹配 baseline_entries 表）
+bool BaselineDB::GetBaselineEntry(const std::string& file_path, CheckEntry& out) {
+    const char* sql = "SELECT file_path, file_type, hash, permission, uid, gid, "
+                      "owner, grp, file_size, mtime, snapshot_id, label, recorded_at "
+                      "FROM baseline_entries WHERE file_path = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        spdlog::error("GetBaselineEntry: prepare failed: {}", sqlite3_errmsg(db_));
+        return false;
+    }
+    sqlite3_bind_text(stmt, 1, file_path.c_str(), -1, SQLITE_STATIC);
+
+    bool found = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        out.file_path   = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        out.file_type   = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        out.hash        = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        out.permission  = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        out.uid         = sqlite3_column_int64(stmt, 4);
+        out.gid         = sqlite3_column_int64(stmt, 5);
+        const auto* owner = sqlite3_column_text(stmt, 6);
+        const auto* grp   = sqlite3_column_text(stmt, 7);
+        out.owner       = owner != nullptr ? reinterpret_cast<const char*>(owner) : "";
+        out.grp         = grp   != nullptr ? reinterpret_cast<const char*>(grp)   : "";
+        out.file_size   = sqlite3_column_int64(stmt, 8);
+        out.mtime       = sqlite3_column_int64(stmt, 9);
+        out.snapshot_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        out.label       = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11));
+        out.recorded_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 12));
+        found = true;
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}

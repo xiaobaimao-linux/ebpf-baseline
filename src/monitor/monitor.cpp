@@ -1,8 +1,10 @@
 #include "monitor.hpp"
 #include "../bpf/event.h"
+#include "monitor_baseline.hpp"
 #include "utils.hpp"
 #include "config.hpp"
 #include "commonfun.hpp"
+#include "baseline_db.hpp"
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -13,6 +15,7 @@
 #include <linux/types.h>
 #include <pwd.h>
 #include <spdlog/spdlog.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unordered_map>
 #include <sstream>
@@ -69,6 +72,9 @@ static std::string ResolveUserInfoByPid(int pid, std::string& uid) {
 std::unordered_map<unsigned long, Rule> g_inode_to_rule;
 std::unordered_map<unsigned long, std::string> g_inode_to_path;
 std::unordered_map<unsigned long, std::string> g_inode_to_hash;
+
+// 基线实时监控映射：inode -> CheckEntry（仅当 --db 模式下非空）
+std::unordered_map<unsigned long, CheckEntry> g_inode_to_baseline;
 
 // 初始化映射
 void init_inode_maps(const Config &config) {
@@ -209,57 +215,70 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     auto* alert_mgr = static_cast<AlertManager*>(ctx);
     auto* e = static_cast<struct event *>(data);
 
+    // ── 原有 YAML 规则匹配逻辑（不变）──────────────────────────────
     auto it_rule = g_inode_to_rule.find(e->ino);
-    if (it_rule == g_inode_to_rule.end()) {
-        return 0;
+    if (it_rule != g_inode_to_rule.end()) {
+        const Rule &rule = it_rule->second;
+
+        auto it_path = g_inode_to_path.find(e->ino);
+        if (it_path != g_inode_to_path.end()) {
+            const std::string &path = it_path->second;
+
+            const std::string actual_event = ((e->mask & EVENT_READ) != 0) ? "read" : "write";
+            if (alert_mgr != nullptr) {
+                on_violation_detected(rule, path, actual_event, e->comm, e->pid, *alert_mgr);
+            }
+
+            if (alert_mgr != nullptr && (e->mask & EVENT_WRITE) != 0) {
+                on_check_mismatch_detected(rule, path, e->comm, e->pid, *alert_mgr);
+            }
+        }
+
+        auto it_hash = g_inode_to_hash.find(e->ino);
+        if (it_hash != g_inode_to_hash.end()) {
+            const std::string &expected_hash = it_hash->second;
+            std::string current_hash = compute_sha256(it_path->second);
+
+            if (current_hash != expected_hash) {
+                std::ostringstream oss;
+                oss << "[" << actionToString(static_cast<Action>(e->action)) << "] File modified! hash mismatch\n"
+                    << "  path: " << it_path->second << "\n"
+                    << "  pid: " << e->pid << "\n"
+                    << "  comm: " << e->comm << "\n"
+                    << "  expected_hash: " << expected_hash << "\n"
+                    << "  current_hash:  " << current_hash << std::endl;
+                spdlog::warn(oss.str());
+            }
+        } else {
+            std::ostringstream oss;
+            oss << "[" << actionToString(static_cast<Action>(e->action)) << "] File access detected (no hash baseline)\n"
+                << "  path: " << (it_path != g_inode_to_path.end() ? it_path->second : "unknown") << "\n"
+                << "  pid: " << e->pid << "\n"
+                << "  comm: " << e->comm << std::endl;
+            spdlog::warn(oss.str());
+            spdlog::default_logger()->flush();
+        }
     }
-    const Rule &rule = it_rule->second;
 
-    auto it_path = g_inode_to_path.find(e->ino);
-    if (it_path == g_inode_to_path.end()) {
-        return 0;
-    }
-    const std::string &path = it_path->second;
+    // ── 基线实时比对（--db 模式下）────────────────────────────────
+    if (!g_inode_to_baseline.empty() && alert_mgr != nullptr) {
+        auto it_bl = g_inode_to_baseline.find(e->ino);
+        if (it_bl != g_inode_to_baseline.end()) {
+            const CheckEntry& baseline = it_bl->second;
+            // 使用基线中存储的完整路径（不跟随 symlink）
+            const std::string& full_path = baseline.file_path;
 
-    const std::string actual_event = ((e->mask & EVENT_READ) != 0) ? "read" : "write";
-    if (alert_mgr != nullptr) {
-        on_violation_detected(rule, path, actual_event, e->comm, e->pid, *alert_mgr);
-    }
-
-    if (alert_mgr != nullptr && (e->mask & EVENT_WRITE) != 0) {
-        on_check_mismatch_detected(rule, path, e->comm, e->pid, *alert_mgr);
-    }
-
-    auto it_hash = g_inode_to_hash.find(e->ino);
-    if (it_hash == g_inode_to_hash.end()) {
-        std::ostringstream oss;
-        oss << "[" << actionToString(static_cast<Action>(e->action)) << "] File access detected (no hash baseline)\n"
-            << "  path: " << path << "\n"
-            << "  pid: " << e->pid << "\n"
-            << "  comm: " << e->comm << std::endl;
-        spdlog::warn(oss.str());
-        spdlog::default_logger()->flush();
-        return 0;
-    }
-
-    const std::string &expected_hash = it_hash->second;
-    std::string current_hash = compute_sha256(path);
-
-    if (current_hash != expected_hash) {
-        std::ostringstream oss;
-        oss << "[" << actionToString(static_cast<Action>(e->action)) << "] File modified! hash mismatch\n"
-            << "  path: " << path << "\n"
-            << "  pid: " << e->pid << "\n"
-            << "  comm: " << e->comm << "\n"
-            << "  expected_hash: " << expected_hash << "\n"
-            << "  current_hash:  " << current_hash << std::endl;
-        spdlog::warn(oss.str());
+            BaselineDeviation dev = CompareWithBaseline(baseline, full_path);
+            if (!dev.event_type.empty()) {
+                HandleBaselineDeviation(dev, full_path, e->comm, e->pid, *alert_mgr);
+            }
+        }
     }
 
     return 0;
 }
 
-int do_monitor(const Config& config, AlertManager &alert_mgr) {
+int do_monitor(const Config& config, AlertManager &alert_mgr, const std::string& baseline_db_path) {
     struct lsm_file_bpf *skel;
     int err;
 
@@ -307,6 +326,46 @@ int do_monitor(const Config& config, AlertManager &alert_mgr) {
     // 初始化 inode 映射
     init_inode_maps(config);
 
+    // ── 基线实时监控初始化（仅当 --db 模式下）────────────────────
+    BaselineDB* baseline_db = nullptr;
+    if (!baseline_db_path.empty()) {
+        try {
+            baseline_db = new BaselineDB(baseline_db_path);  // WAL 已自动开启
+
+            // 加载全部基线条目，构建 inode -> CheckEntry 映射
+            g_inode_to_baseline.clear();
+            auto entries = baseline_db->GetAllBaselineEntries();
+            for (auto& e : entries) {
+                struct stat st;
+                if (lstat(e.file_path.c_str(), &st) == 0 && st.st_ino != 0) {
+                    g_inode_to_baseline[st.st_ino] = e;
+                }
+            }
+            spdlog::info("[baseline_monitor] loaded {} baseline entries from {}",
+                         g_inode_to_baseline.size(), baseline_db_path);
+
+            // 注册基线 inode 到 eBPF map（仅当该 inode 尚未被 YAML 规则注册时）
+            int baseline_registered = 0;
+            for (const auto& [ino, entry] : g_inode_to_baseline) {
+                if (g_inode_to_rule.find(ino) == g_inode_to_rule.end()) {
+                    struct monitor_rule value{};
+                    value.action = ACTION_ALERT;
+                    value.events_mask = EVENT_READ | EVENT_WRITE;
+                    if (bpf_map_update_elem(fd_actions, &ino, &value, BPF_NOEXIST) == 0) {
+                        ++baseline_registered;
+                    }
+                }
+            }
+            spdlog::info("[baseline_monitor] registered {} baseline inodes to eBPF map",
+                         baseline_registered);
+        } catch (const std::exception& ex) {
+            spdlog::error("[baseline_monitor] failed to open baseline DB: {}", ex.what());
+            delete baseline_db;
+            baseline_db = nullptr;
+            g_inode_to_baseline.clear();
+        }
+    }
+
     spdlog::info("Monitoring started. Press Ctrl+C to stop.");
 
     struct ring_buffer *rb =
@@ -314,6 +373,7 @@ int do_monitor(const Config& config, AlertManager &alert_mgr) {
 
     if (!rb) {
         spdlog::error("[bpf_program_error] Failed to create ring buffer");
+        if (baseline_db) delete baseline_db;
         lsm_file_bpf__destroy(skel);
         return 1;
     }
@@ -321,6 +381,8 @@ int do_monitor(const Config& config, AlertManager &alert_mgr) {
     int count = 0;
     // 每1小时(约36000次poll)触发一次保留策略清理
     const int RETENTION_INTERVAL = 36000;  // 100ms * 36000 = 3600s = 1h
+    // 每60秒触发一次 missing 检测（100ms * 600 = 60s）
+    const int MISSING_CHECK_INTERVAL = 600;
     while (running) {
         count++;
         err = ring_buffer__poll(rb, 100);
@@ -334,11 +396,34 @@ int do_monitor(const Config& config, AlertManager &alert_mgr) {
             int deleted = alert_mgr.RunRetention();
             (void)deleted;  // 避免unused警告
         }
+
+        // 定期执行基线 missing 检测（文件被删除的情况，eBPF 无法捕获）
+        if (!g_inode_to_baseline.empty() && count % MISSING_CHECK_INTERVAL == 0) {
+            for (const auto& [ino, entry] : g_inode_to_baseline) {
+                struct stat st;
+                if (lstat(entry.file_path.c_str(), &st) != 0) {
+                    // 文件不存在 -> missing 告警
+                    BaselineDeviation dev;
+                    dev.event_type = "missing";
+                    dev.severity = "high";
+                    dev.expected = "file exists";
+                    dev.actual = "file missing";
+                    HandleBaselineDeviation(dev, entry.file_path, "-", 0, alert_mgr);
+                }
+            }
+        }
     }
 
     spdlog::info("[service_stop] monitoring loop exited");
     spdlog::info("Monitoring stopped.");
     ring_buffer__free(rb);
     lsm_file_bpf__destroy(skel);
+
+    // 清理基线资源
+    if (baseline_db) {
+        delete baseline_db;
+        g_inode_to_baseline.clear();
+    }
+
     return 0;
 }

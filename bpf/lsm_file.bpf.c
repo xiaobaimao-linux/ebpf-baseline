@@ -19,7 +19,7 @@ struct {
 // 存储要监控的文件 inode（从用户态传入）和对应的 action / events_mask
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 64);
+    __uint(max_entries, 8192);
     __type(key, unsigned long); // inode
     __type(value, struct monitor_rule);
 } monitor_actions SEC(".maps");

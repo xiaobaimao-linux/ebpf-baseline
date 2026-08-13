@@ -156,6 +156,9 @@ public:
     // 获取全部基线条目（含快照元信息），用于 check / clean 子命令
     std::vector<CheckEntry> GetAllBaselineEntries();
 
+    // 查询单条基线条目（按 file_path 精确匹配 baseline_entries 表），不存在时返回 false
+    bool GetBaselineEntry(const std::string& file_path, CheckEntry& out);
+
 private:
     sqlite3* db_ = nullptr;
 

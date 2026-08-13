@@ -198,8 +198,14 @@ int main(int argc, char *argv[]) {
     // 设置全局日志级别（默认是 info，低于它的 debug/trace 不会输出）
     spdlog::set_level(spdlog::level::debug);
 
-    // 2. 初始化数据库
-    BaselineDB db;
+    // 2. 延迟初始化数据库（仅在需要时创建）
+    BaselineDB* db_ptr = nullptr;
+    auto get_db = [&db_ptr]() -> BaselineDB& {
+        if (!db_ptr) {
+            db_ptr = new BaselineDB();
+        }
+        return *db_ptr;
+    };
 
     std::string config_path;
     std::string cmd;
@@ -294,7 +300,7 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
 
-            const auto events = db.GetMonitorEvents(start, end);
+            const auto events = get_db().GetMonitorEvents(start, end);
             ReportGenerator rg;
             if (!rg.GenerateMonitorEventsHtml(events, output_path, start, end)) {
                 fprintf(stderr, "Error: failed to generate HTML report: %s\n", output_path.c_str());
@@ -362,9 +368,94 @@ int main(int argc, char *argv[]) {
                 ++j;
             }
 
-            const auto alerts = db.GetAlerts(rule, limit, today);
+            const auto alerts = get_db().GetAlerts(rule, limit, today);
             PrintAlerts(alerts);
             return 0;
+        } else if (arg == "monitor") {
+            // 解析 monitor 子命令的参数
+            std::string monitor_db_path;
+            int j = i + 1;
+            while (j < argc) {
+                std::string subarg = argv[j];
+                if (subarg == "--db") {
+                    if (j + 1 >= argc) {
+                        fprintf(stderr, "Error: missing value for --db\n");
+                        return 1;
+                    }
+                    monitor_db_path = argv[++j];
+                } else if (subarg.rfind("--db=", 0) == 0) {
+                    monitor_db_path = subarg.substr(5);
+                } else if (subarg == "-c" || subarg == "--config") {
+                    if (j + 1 >= argc) {
+                        fprintf(stderr, "Error: missing value for -c\n");
+                        return 1;
+                    }
+                    config_path = argv[++j];
+                } else if (subarg.rfind("--config=", 0) == 0) {
+                    config_path = subarg.substr(std::string("--config=").size());
+                } else if (subarg == "-h" || subarg == "--help") {
+                    printf("Usage: baseline-guard monitor [options]\n");
+                    printf("Options:\n");
+                    printf("  --db PATH    SQLite baseline DB path (enables baseline comparison)\n");
+                    printf("  -c PATH      YAML config file (optional when --db is used)\n");
+                    printf("  -h, --help   display this message\n");
+                    return 0;
+                } else {
+                    fprintf(stderr, "Error: unknown monitor option: %s\n", subarg.c_str());
+                    return 1;
+                }
+                ++j;
+            }
+
+            if (monitor_db_path.empty()) {
+                // 无 --db: 走原有 YAML 监控流程（需要 -c config）
+                cmd = "monitor";
+            } else {
+                // 有 --db: 直接执行基线实时监控
+                Logger::init("/var/log/baseline-guard");
+                spdlog::info("[service_start] baseline-guard monitor --db {} starting, pid={}",
+                             monitor_db_path, getpid());
+
+                Config config;
+                if (!config_path.empty()) {
+                    if (!ends_with(config_path, ".yaml") && !ends_with(config_path, ".yml")) {
+                        spdlog::error("[config_error] only yaml/yml config is supported now: {}", config_path);
+                        return 1;
+                    }
+                    config = parseYamlFile(config_path);
+                    compute_inodes(config);
+                    spdlog::info("[rules_loaded] config={}, rules={}", config_path, config.rules.size());
+                }
+
+                AlertManager alert_mgr;
+                if (!config_path.empty()) {
+                    alert_mgr.LoadConfig(config.alert, config.db);
+                }
+                BaselineDB alert_db;  // 使用默认路径
+                alert_mgr.SetDB(&alert_db);
+
+                if (alert_mgr.IsEnabled()) {
+                    spdlog::info("DingTalk alert enabled, throttle={}s", config.alert.throttle_seconds);
+                }
+
+                signal(SIGHUP, sighup_handler);
+                int ret = 0;
+                while (true) {
+                    ret = do_monitor(config, alert_mgr, monitor_db_path);
+                    if (!g_reload) {
+                        break;
+                    }
+                    g_reload = false;
+                    if (!config_path.empty()) {
+                        spdlog::info("[rules_reload] SIGHUP received, reloading config from {}", config_path);
+                        config = parseYamlFile(config_path);
+                        compute_inodes(config);
+                        spdlog::info("[rules_reload] config reloaded, rules={}", config.rules.size());
+                    }
+                }
+                spdlog::info("[service_stop] monitor mode stopped, exit_code={}", ret);
+                return ret;
+            }
         } else if (cmd.empty()) {
             cmd = arg;
         } else {
@@ -405,7 +496,7 @@ int main(int argc, char *argv[]) {
 
     AlertManager alert_mgr;
     alert_mgr.LoadConfig(config.alert, config.db);
-    alert_mgr.SetDB(&db);
+    alert_mgr.SetDB(&get_db());
 
     if (alert_mgr.IsEnabled()) {
         spdlog::info("DingTalk alert enabled, throttle={}s", config.alert.throttle_seconds);
@@ -419,7 +510,7 @@ int main(int argc, char *argv[]) {
 
     if (cmd == "check") {
         spdlog::info("[service_start] check mode started");
-        int ret = do_check(config, db);
+        int ret = do_check(config, get_db());
         spdlog::info("[service_stop] check mode finished, exit_code={}", ret);
         return ret;
     } else if (cmd == "monitor") {

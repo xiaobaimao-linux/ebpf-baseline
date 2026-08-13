@@ -39,6 +39,7 @@ MAIN_SRCS = src/main.cpp \
             src/cli/config.cpp \
             src/common/commonfun.cpp \
             src/common/utils.cpp \
+            src/monitor/monitor_baseline.cpp \
             src/report/report_generator.cpp \
             src/storage/baseline_db.cpp
 MONITOR_SRC = src/monitor/monitor.cpp
