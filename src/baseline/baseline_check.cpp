@@ -130,8 +130,9 @@ bool ParseOptions(int argc, char* argv[], CheckOptions& options, bool& help,
 
 // ── comparison ───────────────────────────────────────────────────────
 
-// Compare one baseline entry against disk.  Returns empty finding when OK.
-CheckFinding CheckOneEntry(const CheckEntry& entry) {
+// Compare one baseline entry against disk.  Returns zero or more findings.
+std::vector<CheckFinding> CheckOneEntry(const CheckEntry& entry) {
+    std::vector<CheckFinding> findings;
     CheckFinding f;
     f.file_path = entry.file_path;
 
@@ -142,11 +143,13 @@ CheckFinding CheckOneEntry(const CheckEntry& entry) {
         f.expected   = "file exists";
         f.actual     = "file missing";
         f.details    = "baseline entry exists but file not found on disk";
-        return f;
+        findings.push_back(std::move(f));
+        return findings;
     }
 
     // sha256
     std::string actual_hash;
+    bool hash_changed = false;
     try {
         actual_hash = compute_sha256(entry.file_path);
     } catch (const std::exception& ex) {
@@ -155,27 +158,33 @@ CheckFinding CheckOneEntry(const CheckEntry& entry) {
         f.expected   = "hash computable";
         f.actual     = std::string("error: ") + ex.what();
         f.details    = "cannot compute sha256";
-        return f;
+        findings.push_back(std::move(f));
+        return findings;
     }
 
     if (actual_hash != entry.hash) {
-        f.event_type = "hash_changed";
-        f.severity   = "high";
-        f.expected   = "sha256:" + entry.hash.substr(0, 16) + "...";
-        f.actual     = "sha256:" + actual_hash.substr(0, 16) + "...";
-        f.details    = "file content has changed";
-        return f;
+        hash_changed = true;
+        CheckFinding hf;
+        hf.file_path = entry.file_path;
+        hf.event_type = "hash_changed";
+        hf.severity   = "high";
+        hf.expected   = "sha256:" + entry.hash.substr(0, 16) + "...";
+        hf.actual     = "sha256:" + actual_hash.substr(0, 16) + "...";
+        hf.details    = "file content has changed";
+        findings.push_back(std::move(hf));
     }
 
-    // hash matches — check permission / uid / gid (no mtime)
+    // check permission / uid / gid (always, regardless of hash result)
     std::string actual_perm = mode_to_string(st.st_mode & 0777);
     bool perm_diff = (actual_perm != entry.permission);
     bool uid_diff  = (static_cast<int64_t>(st.st_uid) != entry.uid);
     bool gid_diff  = (static_cast<int64_t>(st.st_gid) != entry.gid);
 
     if (perm_diff || uid_diff || gid_diff) {
-        f.event_type = "perm_changed";
-        f.severity   = "medium";
+        CheckFinding pf;
+        pf.file_path = entry.file_path;
+        pf.event_type = "perm_changed";
+        pf.severity   = "medium";
         std::string exp_parts, act_parts;
         if (perm_diff) {
             exp_parts += "mode=" + entry.permission;
@@ -193,14 +202,15 @@ CheckFinding CheckOneEntry(const CheckEntry& entry) {
             if (!act_parts.empty()) act_parts += ", ";
             act_parts += "gid=" + std::to_string(st.st_gid);
         }
-        f.expected = exp_parts;
-        f.actual   = act_parts;
-        f.details  = "permission/ownership changed (hash unchanged)";
-        return f;
+        pf.expected = exp_parts;
+        pf.actual   = act_parts;
+        pf.details  = hash_changed
+                          ? "permission/ownership changed (hash also changed)"
+                          : "permission/ownership changed (hash unchanged)";
+        findings.push_back(std::move(pf));
     }
 
-    // all OK — return empty finding
-    return f;
+    return findings;
 }
 
 // ── output: console ──────────────────────────────────────────────────
@@ -402,9 +412,11 @@ int RunBaselineCheck(int argc, char* argv[]) {
             ce.label        = entry.label;
             ce.recorded_at  = entry.recorded_at;
 
-            CheckFinding f = CheckOneEntry(ce);
-            if (!f.event_type.empty()) {
-                findings.push_back(std::move(f));
+            auto entry_findings = CheckOneEntry(ce);
+            for (auto& f : entry_findings) {
+                if (!f.event_type.empty()) {
+                    findings.push_back(std::move(f));
+                }
             }
         }
 
