@@ -1,6 +1,7 @@
 #include "baseline_list.hpp"
 
 #include "baseline_db.hpp"
+#include "utils.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -20,6 +21,7 @@ struct ListOptions {
     int limit = 0;       // 0 = 不限制
     int offset = 0;
     bool json_output = false;
+    bool hash_only = false;  // --hash-only: 仅显示哈希不一致的条目
 };
 
 void PrintUsage() {
@@ -33,13 +35,15 @@ void PrintUsage() {
               << "  --limit N                maximum number of rows to return\n"
               << "  --offset N               pagination offset (default: 0)\n"
               << "  --json                   output structured JSON\n"
+              << "  --hash-only              only show entries with hash mismatch\n"
               << "  -h, --help               display this message\n"
               << "\n"
               << "Examples:\n"
               << "  baseline-guard baseline list --limit 50\n"
               << "  baseline-guard baseline list --path-filter \"/etc/ssh/%\"\n"
               << "  baseline-guard baseline list --path-filter \"/etc/%\" --limit 50 --offset 50\n"
-              << "  baseline-guard baseline list --path-filter \"/etc/%\" --json > etc-baseline.json\n";
+              << "  baseline-guard baseline list --path-filter \"/etc/%\" --json > etc-baseline.json\n"
+              << "  baseline-guard baseline list --hash-only\n";
 }
 
 bool ParseOptions(int argc, char* argv[], ListOptions& options, bool& help,
@@ -82,6 +86,8 @@ bool ParseOptions(int argc, char* argv[], ListOptions& options, bool& help,
         };
         if (!end_options && arg == "--json") {
             options.json_output = true;
+        } else if (!end_options && arg == "--hash-only") {
+            options.hash_only = true;
         } else if (!end_options && arg == "--db") {
             if (!take_value(arg, options.db_path)) return false;
         } else if (!end_options && arg.rfind("--db=", 0) == 0) {
@@ -155,9 +161,10 @@ void PrintTextTable(const ListResult& result, const ListOptions& options) {
               << std::setw(12) << "SIZE"
               << std::setw(20) << "RECORDED_AT"
               << std::setw(16) << "LABEL"
+              << std::setw(66) << "HASH"
               << std::endl;
 
-    std::cout << std::string(134, '-') << std::endl;
+    std::cout << std::string(200, '-') << std::endl;
 
     for (const auto& entry : result.entries) {
         // 路径过长时截断
@@ -175,6 +182,7 @@ void PrintTextTable(const ListResult& result, const ListOptions& options) {
                   << std::setw(12) << entry.file_size
                   << std::setw(20) << entry.recorded_at
                   << std::setw(16) << entry.label
+                  << std::setw(66) << entry.hash
                   << std::endl;
     }
 
@@ -251,6 +259,25 @@ int RunBaselineList(int argc, char* argv[]) {
         ListResult result = db.ListBaselineEntries(options.path_filter,
                                                     options.limit,
                                                     options.offset);
+
+        // --hash-only: 过滤出哈希不一致的条目
+        if (options.hash_only) {
+            std::vector<ListEntry> mismatched;
+            for (const auto& entry : result.entries) {
+                std::string current_hash;
+                try {
+                    current_hash = compute_sha256(entry.file_path);
+                } catch (...) {
+                    // 文件不存在或无法读取，视为哈希不一致
+                    mismatched.push_back(entry);
+                    continue;
+                }
+                if (current_hash != entry.hash) {
+                    mismatched.push_back(entry);
+                }
+            }
+            result.entries = std::move(mismatched);
+        }
 
         if (options.json_output) {
             PrintJson(result);
