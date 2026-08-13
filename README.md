@@ -26,7 +26,7 @@ baseline-guard 是一款基于 eBPF LSM 的 Linux 内核级安全工具，填补
 
 ------
 
-## 二、核心功能（4大模块）
+## 二、核心功能（6大模块）
 
 ### 模块1：安全基线定义（YAML 配置）
 
@@ -73,9 +73,9 @@ alert:
 
 ------
 
-### 模块2：静态基线核查（check 模式）
+### 模块2：静态合规核查（check 模式）
 
-一次性扫描系统，对照 YAML 基线输出合规状态。
+基于 YAML 规则的一次性扫描，对照基线输出合规状态。
 
 ```
 $ ./baseline-guard check -c rules.yaml
@@ -96,30 +96,13 @@ $ ./baseline-guard check -c rules.yaml
 
 ------
 
-### 模块2：静态基线核查（check 模式）
+### 模块3：基线快照管理（baseline 子命令）
 
-一次性扫描系统，对照 YAML 基线输出合规状态。
+`baseline` 子命令族提供完整的基线生命周期管理，数据存储在 SQLite 中。所有子命令支持 `--db PATH` 指定数据库路径。
 
-```
-$ ./baseline-guard check -c rules.yaml
+#### 3.1 baseline snapshot — 采集基线
 
-[SYS-PERM-001] /etc/passwd
-  ✓ PASS: mode 0644 (expected 0644)
-
-[SYS-HASH-001] /usr/bin/sshd
-  ✓ PASS: mode 0644 (expected 0644)
-  ✓ PASS: sha256 matches
-
-[SYS-COMBO-001] /home/sf/combo.txt
-  ✗ FAIL: mode 0777 (expected 0644)
-  ✓ PASS: sha256 matches
-
-合规评分：75/100
-```
-
-### 模块3：基线快照（baseline snapshot）
-
-`baseline snapshot` 是不依赖 YAML 规则的底层基线采集命令，直接扫描一个或多个文件/目录，并将当前文件状态写入 SQLite。目录默认递归扫描；每个文件在 `baseline_entries` 中只保留一条当前生效记录，实际新增、修改和删除会记录到 `baseline_audit`。
+扫描文件/目录，将当前状态写入 SQLite。目录默认递归扫描；每个文件在 `baseline_entries` 中只保留一条当前生效记录，变更会记录到 `baseline_audit`。
 
 ```bash
 ./baseline-guard baseline snapshot /etc /usr/bin \
@@ -128,15 +111,119 @@ $ ./baseline-guard check -c rules.yaml
   --exclude /etc/cache
 ```
 
-支持的选项：
+| 参数             | 说明                                                    |
+| ---------------- | ------------------------------------------------------- |
+| `PATH...`        | 至少一个文件或目录（必填）                              |
+| `--db PATH`      | SQLite 数据库路径                                       |
+| `--label NAME`   | 快照标签，默认 `default`                                |
+| `--exclude PATH` | 排除路径，可重复                                        |
+| `--no-recurse`   | 目录只扫描直接子文件                                    |
 
-- `PATH...`：至少一个文件或目录，可指定多个。
-- `--db PATH`：指定 SQLite 数据库，默认 `/var/lib/baseline-guard/baseline.db`。
-- `--label NAME`：本次快照标签，默认 `default`。
-- `--exclude PATH`：单次扫描临时排除路径，可重复使用，不会修改全局白名单。
-- `--no-recurse`：目录只扫描直接子文件，不进入下级目录。
+#### 3.2 baseline list — 查询基线
 
-重复执行相同快照不会产生新的审计变更；文件内容、权限、属主或元数据发生变化时会产生 `modified` 记录。只扫描部分目录时，只会处理当前扫描作用域中的删除，不会影响其他目录的基线。
+分页查询已采集的基线条目，支持路径模糊过滤和 JSON 输出。
+
+```bash
+# 按目录过滤，前50条
+./baseline-guard baseline list --path-filter "/etc/ssh/%" --limit 50
+
+# 分页：第2页
+./baseline-guard baseline list --limit 50 --offset 50
+
+# 全量 JSON 导出
+./baseline-guard baseline list --json > baseline.json
+```
+
+| 参数                    | 说明                                            |
+| ----------------------- | ----------------------------------------------- |
+| `--db PATH`             | SQLite 数据库路径                               |
+| `--path-filter PATTERN` | SQL LIKE 路径过滤（`%` 为通配符）               |
+| `--limit N`             | 结果行数上限                                    |
+| `--offset N`            | 分页偏移量                                      |
+| `--json`                | 输出结构化 JSON                                 |
+
+#### 3.3 baseline delete — 删除基线
+
+手动删除指定路径的基线记录，支持多路径和递归删除。
+
+```bash
+# 精确删除单文件基线
+./baseline-guard baseline delete /etc/passwd --db baseline.db
+
+# 目录递归删除所有子文件基线
+./baseline-guard baseline delete /etc --recurse --db baseline.db
+
+# 多路径混合
+./baseline-guard baseline delete /etc/passwd /root/.ssh --recurse
+```
+
+| 参数          | 说明                                                     |
+| ------------- | -------------------------------------------------------- |
+| `PATH...`     | 待删除的文件/目录路径（必填）                            |
+| `--db PATH`   | SQLite 数据库路径                                        |
+| `--recurse`   | 目录路径启用递归前缀匹配；文件路径始终精确匹配          |
+
+每条删除自动生成 `baseline_audit` 审计记录（`op_type=delete`，保留旧基线值）。
+
+#### 3.4 baseline check — 离线一致性核查
+
+读取 `baseline_entries` 中的基线 → 逐个比对磁盘真实文件 → 识别篡改和文件消失。差异写入 `alerts` 表（`rule_id=baseline-check`），可选推送钉钉、输出 HTML 报告。
+
+```bash
+# 全量离线核查，控制台输出
+./baseline-guard baseline check --db baseline.db
+
+# 仅校验 /etc 下已快照基线
+./baseline-guard baseline check --path-filter "/etc%"
+
+# 检出差异推送钉钉（需指定 YAML 配置）
+./baseline-guard baseline check --send-webhook -c config.yaml
+
+# 核查并导出 HTML 审计报表
+./baseline-guard baseline check --path-filter "/etc%" --report_html check.html
+
+# JSON 结构化输出
+./baseline-guard baseline check --json
+```
+
+| 参数                    | 说明                                                     |
+| ----------------------- | -------------------------------------------------------- |
+| `--db PATH`             | SQLite 数据库路径                                        |
+| `--path-filter PATTERN` | SQL LIKE 过滤，只校验匹配路径的基线条目                  |
+| `--report_html FILE`    | 输出差异告警到 HTML 文件（控制台不再输出告警详情）        |
+| `--json`                | 输出结构化 JSON 数组                                     |
+| `--send-webhook`        | 将检出差异推送钉钉（需配合 `-c` 指定 YAML 配置）         |
+| `-c, --config PATH`     | YAML 配置文件路径（提供钉钉 webhook 等配置）             |
+
+比对项与事件类型：
+
+| 比对项                     | event_type       | severity | 说明                               |
+| -------------------------- | ---------------- | -------- | ---------------------------------- |
+| 磁盘文件缺失               | `missing`        | high     | 基线存在但磁盘文件已消失           |
+| sha256 不一致              | `hash_changed`   | high     | 文件内容被篡改                     |
+| hash 一致、权限/属主变动   | `perm_changed`   | medium   | 权限/uid/gid 变动但内容未变        |
+| 文件读取权限不足           | `access_failed`  | medium   | 无法计算哈希（权限不足等）         |
+
+> **注意**：只检查库内已有基线，不扫描磁盘新增文件。不跟随 symlink。差异始终写入 `alerts` 表；钉钉仅 `--send-webhook` 时推送，复用现有节流降噪逻辑。
+
+#### 3.5 baseline clean — 清理孤儿基线
+
+自动识别并清理磁盘上已不存在的孤儿基线记录。会删除 `baseline_entries` 并写入 `baseline_audit` 审计。
+
+```bash
+# 先预演，查看哪些孤儿基线会被清理
+./baseline-guard baseline clean --dry-run --db baseline.db
+
+# 确认无误，真实清理
+./baseline-guard baseline clean --db baseline.db
+```
+
+| 参数          | 说明                                                   |
+| ------------- | ------------------------------------------------------ |
+| `--db PATH`   | SQLite 数据库路径                                      |
+| `--dry-run`   | 预扫描模式：只打印待清理条目，不执行删除               |
+
+> **与 `baseline delete` 的区别**：`delete` 是人工指定路径主动删除；`clean` 是自动识别磁盘已消失的僵尸基线批量清理。
 
 ------
 
@@ -160,7 +247,24 @@ $ ./baseline-guard monitor -c rules.yaml
 
 ------
 
-### 模块4：monitor 事件报告
+### 模块5：告警查询（alerts）
+
+查询 SQLite 中持久化的告警记录。
+
+```bash
+# 查看最新20条告警
+./baseline-guard alerts
+
+# 查看今日告警，按规则过滤
+./baseline-guard alerts --today --rule SYS-MONITOR
+
+# 限制数量
+./baseline-guard alerts -n 50
+```
+
+------
+
+### 模块6：monitor 事件报告（report）
 
 ```bash
 ./baseline-guard report --start 2026-08-01 --end 2026-08-10 -o ./monitor-events.html
@@ -174,23 +278,30 @@ $ ./baseline-guard monitor -c rules.yaml
 - 仅指定日期时，开始日期按 `00:00:00`、结束日期按 `23:59:59` 处理
 - 两个时间参数都省略时输出全部 monitor 事件
 
-报告包含事件时间、规则、严重级别、文件、事件类型、进程/PID、用户/UID、预期值、实际值和动作。原有 `alerts` 命令仍用于控制台查询；HTML 输出已从 `alerts --report_html` 迁移到 `report -o`。
+报告包含事件时间、规则、严重级别、文件、事件类型、进程/PID、用户/UID、预期值、实际值和动作。
 
 ------
 
-## 三、快速开始（3步）
+## 三、快速开始
 
 ```
 # 1. 编译
-git clone https://github.com/yourname/baseline-guard.git
-cd baseline-guard
 make
 
-# 2. 静态核查
-./baseline-guard check -c examples/rules.yaml
+# 2. 采集基线快照
+./baseline-guard baseline snapshot /etc/ssh --db baseline.db --label initial
 
-# 3. 运行时监控
-./baseline-guard monitor -c examples/rules.yaml
+# 3. 查看已采集基线
+./baseline-guard baseline list --db baseline.db
+
+# 4. 离线一致性核查
+./baseline-guard baseline check --db baseline.db -o check-report.html
+
+# 5. 基于 YAML 规则的静态合规检查
+./baseline-guard check -c baselines/default.yaml
+
+# 6. 运行时监控（需要 root）
+sudo ./baseline-guard monitor -c baselines/default.yaml
 ```
 
 ------
@@ -227,18 +338,40 @@ make
 ```
 baseline-guard/
 ├── src/
-│   ├── main.c           # CLI 入口
-│   ├── config.c         # YAML 解析器
-│   ├── checker.c        # 静态核查
-│   ├── monitor.c        # eBPF 加载 + 事件处理
-│   └── reporter.c       # 报告生成
+│   ├── main.cpp                          # CLI 入口 + 命令路由
+│   ├── alerts/
+│   │   ├── alert_manager.cpp/hpp         # 告警管理 + 钉钉推送
+│   ├── baseline/
+│   │   ├── baseline_snapshot.cpp/hpp     # baseline snapshot 子命令
+│   │   ├── baseline_list.cpp/hpp         # baseline list 子命令
+│   │   ├── baseline_delete.cpp/hpp       # baseline delete 子命令
+│   │   ├── baseline_check.cpp/hpp        # baseline check 子命令
+│   │   └── baseline_clean.cpp/hpp        # baseline clean 子命令
+│   ├── check/
+│   │   └── check.cpp/hpp                 # YAML 规则静态核查
+│   ├── cli/
+│   │   ├── config.cpp/hpp                # YAML 配置解析
+│   │   └── baseline.hpp                  # 旧版 check 命令接口
+│   ├── common/
+│   │   ├── utils.cpp/hpp                 # SHA256 / 权限转换等工具函数
+│   │   ├── commonfun.cpp/hpp             # 通用辅助函数
+│   │   ├── nlohmann/json.hpp             # JSON 库
+│   │   ├── spdlog/                       # 日志库
+│   │   └── logger.h                      # 日志初始化
+│   ├── monitor/
+│   │   └── monitor.cpp/hpp               # eBPF LSM 加载 + 事件处理
+│   ├── report/
+│   │   └── report_generator.cpp/hpp      # HTML 报告生成
+│   └── storage/
+│       └── baseline_db.cpp/hpp           # SQLite 数据层
 ├── bpf/
-│   ├── lsm_file.bpf.c   # eBPF LSM 程序
-│   └── kprobe_chmod.bpf.c  # kprobe 监控程序
-├── include/
-│   └── baseline_guard.h # 公共头文件
-├── examples/
-│   └── rules.yaml       # 示例配置文件
+│   ├── vmlinux.h                         # 内核类型定义
+│   ├── event.h                           # BPF 事件结构
+│   ├── lsm_file.bpf.c                    # eBPF LSM 程序
+│   └── lsm_file.skel.h                   # BPF skeleton 头文件
+├── baselines/
+│   └── default.yaml                      # 默认基线规则
+├── tests/                                # 测试用例
 ├── Makefile
 └── README.md
 ```
@@ -261,7 +394,7 @@ baseline-guard/
 
 ## 八、项目状态
 
-**当前版本：v0.1（MVP）**
+**当前版本：v0.3**
 
 已实现：
 
@@ -270,16 +403,18 @@ baseline-guard/
 - ✅ 文件哈希校验（file_hash）
 - ✅ eBPF LSM 文件读写监控（read / write）
 - ✅ 运行时拦截（block action）
-- ✅ 钉钉告警推送
-- ✅ CLI 彩色输出
+- ✅ 钉钉告警推送 + 频率限制
+- ✅ 基线快照管理（snapshot / list / delete / check / clean）
+- ✅ SQLite 审计日志（baseline_audit）
+- ✅ HTML 合规报告 + 基线核查报告
+- ✅ monitor 事件报告导出
+- ✅ 告警历史查询（alerts）
 
 开发中：
 
 - 🔄 内核参数基线
 - 🔄 进程白名单基线
 - 🔄 网络端口基线
-- 🔄 合规报告生成
-- 🔄 告警频率限制
 
 ------
 

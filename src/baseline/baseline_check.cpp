@@ -1,10 +1,18 @@
 #include "baseline_check.hpp"
 
+#include "alert_manager.hpp"
 #include "baseline_db.hpp"
+#include "commonfun.hpp"
+#include "config.hpp"
+#include "report_generator.hpp"
 #include "utils.hpp"
 
-#include <sys/stat.h>
+#include <nlohmann/json.hpp>
 
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <algorithm>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
@@ -17,19 +25,30 @@
 
 namespace {
 namespace fs = std::filesystem;
+using json = nlohmann::json;
+
+constexpr const char* kRuleId   = "baseline-check";
+constexpr const char* kRuleName = "离线基线核查";
 
 struct CheckOptions {
     std::string db_path = "/var/lib/baseline-guard/baseline.db";
-    std::string output_file;  // HTML report path; empty = console only
+    std::string path_filter;
+    std::string report_html;
+    std::string config_path;
+    bool json_output  = false;
+    bool send_webhook = false;
 };
-
-enum class CheckStatus { ok, file_missing, baseline_tamper };
 
 struct CheckFinding {
     std::string file_path;
-    CheckStatus status = CheckStatus::ok;
-    std::vector<std::string> diffs;  // human-readable diff items
+    std::string event_type;   // missing / hash_changed / perm_changed / access_failed
+    std::string severity;     // high / medium
+    std::string expected;
+    std::string actual;
+    std::string details;
 };
+
+// ── helpers ──────────────────────────────────────────────────────────
 
 std::string NowIso() {
     const auto now = std::chrono::system_clock::now();
@@ -40,33 +59,25 @@ std::string NowIso() {
     return buffer;
 }
 
-std::string EscapeHtml(const std::string& raw) {
-    std::string out;
-    for (char c : raw) {
-        switch (c) {
-            case '&':  out += "&amp;";  break;
-            case '<':  out += "&lt;";   break;
-            case '>':  out += "&gt;";   break;
-            case '"':  out += "&quot;"; break;
-            default:   out += c;
-        }
-    }
-    return out;
-}
-
 void PrintUsage() {
     std::cout << "Usage: baseline-guard baseline check [options]\n"
-              << "Offline baseline integrity check: compare disk files against baseline entries.\n"
+              << "Offline baseline integrity check against SQLite baseline entries.\n"
               << "\n"
               << "Options:\n"
               << "  --db PATH             SQLite database path\n"
-              << "  -o, --output FILE     output HTML audit report file path\n"
+              << "  --path-filter PATTERN SQL LIKE pattern to filter baseline entries\n"
+              << "  --report_html FILE    write deviation report to HTML file\n"
+              << "  --json                output structured JSON array\n"
+              << "  --send-webhook        push deviations to DingTalk (requires --config)\n"
+              << "  -c, --config PATH     YAML config file (for DingTalk webhook)\n"
               << "  -h, --help            display this message\n"
               << "\n"
               << "Examples:\n"
               << "  baseline-guard baseline check\n"
-              << "  baseline-guard baseline check --db baseline.db\n"
-              << "  baseline-guard baseline check -o ./check-report.html\n";
+              << "  baseline-guard baseline check --path-filter \"/etc%\"\n"
+              << "  baseline-guard baseline check --send-webhook -c config.yaml\n"
+              << "  baseline-guard baseline check --path-filter \"/etc%\" --report_html check.html\n"
+              << "  baseline-guard baseline check --json\n";
 }
 
 bool ParseOptions(int argc, char* argv[], CheckOptions& options, bool& help,
@@ -77,9 +88,9 @@ bool ParseOptions(int argc, char* argv[], CheckOptions& options, bool& help,
             help = true;
             return true;
         }
-        auto take_value = [&](const std::string& option, std::string& target) {
+        auto take_value = [&](const std::string& opt, std::string& target) {
             if (i + 1 >= argc) {
-                error = "missing value for " + option;
+                error = "missing value for " + opt;
                 return false;
             }
             target = argv[++i];
@@ -89,10 +100,22 @@ bool ParseOptions(int argc, char* argv[], CheckOptions& options, bool& help,
             if (!take_value(arg, options.db_path)) return false;
         } else if (arg.rfind("--db=", 0) == 0) {
             options.db_path = arg.substr(5);
-        } else if (arg == "-o" || arg == "--output") {
-            if (!take_value(arg, options.output_file)) return false;
-        } else if (arg.rfind("--output=", 0) == 0) {
-            options.output_file = arg.substr(9);
+        } else if (arg == "--path-filter") {
+            if (!take_value(arg, options.path_filter)) return false;
+        } else if (arg.rfind("--path-filter=", 0) == 0) {
+            options.path_filter = arg.substr(14);
+        } else if (arg == "--report_html") {
+            if (!take_value(arg, options.report_html)) return false;
+        } else if (arg.rfind("--report_html=", 0) == 0) {
+            options.report_html = arg.substr(14);
+        } else if (arg == "--json") {
+            options.json_output = true;
+        } else if (arg == "--send-webhook") {
+            options.send_webhook = true;
+        } else if (arg == "-c" || arg == "--config") {
+            if (!take_value(arg, options.config_path)) return false;
+        } else if (arg.rfind("--config=", 0) == 0) {
+            options.config_path = arg.substr(9);
         } else {
             error = "unknown check option: " + arg;
             return false;
@@ -105,203 +128,221 @@ bool ParseOptions(int argc, char* argv[], CheckOptions& options, bool& help,
     return true;
 }
 
-// Compare disk file against baseline entry, return finding
+// ── comparison ───────────────────────────────────────────────────────
+
+// Compare one baseline entry against disk.  Returns empty finding when OK.
 CheckFinding CheckOneEntry(const CheckEntry& entry) {
-    CheckFinding finding;
-    finding.file_path = entry.file_path;
+    CheckFinding f;
+    f.file_path = entry.file_path;
 
     struct stat st = {};
     if (lstat(entry.file_path.c_str(), &st) != 0) {
-        finding.status = CheckStatus::file_missing;
-        finding.diffs.push_back("file does not exist on disk");
-        return finding;
+        f.event_type = "missing";
+        f.severity   = "high";
+        f.expected   = "file exists";
+        f.actual     = "file missing";
+        f.details    = "baseline entry exists but file not found on disk";
+        return f;
     }
 
-    // Compare hash
+    // sha256
     std::string actual_hash;
     try {
         actual_hash = compute_sha256(entry.file_path);
     } catch (const std::exception& ex) {
-        finding.status = CheckStatus::baseline_tamper;
-        finding.diffs.push_back(std::string("hash compute error: ") + ex.what());
-        return finding;
+        f.event_type = "access_failed";
+        f.severity   = "medium";
+        f.expected   = "hash computable";
+        f.actual     = std::string("error: ") + ex.what();
+        f.details    = "cannot compute sha256";
+        return f;
     }
+
     if (actual_hash != entry.hash) {
-        finding.diffs.push_back("hash mismatch (expected: " + entry.hash.substr(0, 16) +
-                                "..., actual: " + actual_hash.substr(0, 16) + "...)");
+        f.event_type = "hash_changed";
+        f.severity   = "high";
+        f.expected   = "sha256:" + entry.hash.substr(0, 16) + "...";
+        f.actual     = "sha256:" + actual_hash.substr(0, 16) + "...";
+        f.details    = "file content has changed";
+        return f;
     }
 
-    // Compare permission
+    // hash matches — check permission / uid / gid (no mtime)
     std::string actual_perm = mode_to_string(st.st_mode & 0777);
-    if (actual_perm != entry.permission) {
-        finding.diffs.push_back("permission changed (expected: " + entry.permission +
-                                ", actual: " + actual_perm + ")");
+    bool perm_diff = (actual_perm != entry.permission);
+    bool uid_diff  = (static_cast<int64_t>(st.st_uid) != entry.uid);
+    bool gid_diff  = (static_cast<int64_t>(st.st_gid) != entry.gid);
+
+    if (perm_diff || uid_diff || gid_diff) {
+        f.event_type = "perm_changed";
+        f.severity   = "medium";
+        std::string exp_parts, act_parts;
+        if (perm_diff) {
+            exp_parts += "mode=" + entry.permission;
+            act_parts += "mode=" + actual_perm;
+        }
+        if (uid_diff) {
+            if (!exp_parts.empty()) exp_parts += ", ";
+            exp_parts += "uid=" + std::to_string(entry.uid);
+            if (!act_parts.empty()) act_parts += ", ";
+            act_parts += "uid=" + std::to_string(st.st_uid);
+        }
+        if (gid_diff) {
+            if (!exp_parts.empty()) exp_parts += ", ";
+            exp_parts += "gid=" + std::to_string(entry.gid);
+            if (!act_parts.empty()) act_parts += ", ";
+            act_parts += "gid=" + std::to_string(st.st_gid);
+        }
+        f.expected = exp_parts;
+        f.actual   = act_parts;
+        f.details  = "permission/ownership changed (hash unchanged)";
+        return f;
     }
 
-    // Compare uid
-    if (static_cast<int64_t>(st.st_uid) != entry.uid) {
-        finding.diffs.push_back("uid changed (expected: " + std::to_string(entry.uid) +
-                                ", actual: " + std::to_string(st.st_uid) + ")");
-    }
-
-    // Compare gid
-    if (static_cast<int64_t>(st.st_gid) != entry.gid) {
-        finding.diffs.push_back("gid changed (expected: " + std::to_string(entry.gid) +
-                                ", actual: " + std::to_string(st.st_gid) + ")");
-    }
-
-    // Compare mtime
-    if (static_cast<int64_t>(st.st_mtime) != entry.mtime) {
-        finding.diffs.push_back("mtime changed (expected: " + std::to_string(entry.mtime) +
-                                ", actual: " + std::to_string(st.st_mtime) + ")");
-    }
-
-    if (!finding.diffs.empty()) {
-        finding.status = CheckStatus::baseline_tamper;
-    }
-    return finding;
+    // all OK — return empty finding
+    return f;
 }
 
-// Print console summary
-void PrintConsoleSummary(const std::vector<CheckFinding>& findings,
-                         const std::string& db_path) {
-    int ok_count = 0, missing_count = 0, tamper_count = 0;
+// ── output: console ──────────────────────────────────────────────────
+
+void PrintConsoleTable(const std::vector<CheckFinding>& findings) {
+    if (findings.empty()) {
+        std::cout << "No baseline deviation found." << std::endl;
+        return;
+    }
+
+    std::cout << std::left
+              << std::setw(16) << "EVENT_TYPE"
+              << std::setw(10) << "SEVERITY"
+              << std::setw(48) << "FILE_PATH"
+              << std::setw(40) << "DETAILS"
+              << std::endl;
+    std::cout << std::string(114, '-') << std::endl;
+
     for (const auto& f : findings) {
-        switch (f.status) {
-            case CheckStatus::ok:            ++ok_count;     break;
-            case CheckStatus::file_missing:  ++missing_count; break;
-            case CheckStatus::baseline_tamper: ++tamper_count; break;
+        std::string path_disp = f.file_path;
+        if (path_disp.size() > 46) {
+            path_disp = "..." + path_disp.substr(path_disp.size() - 43);
         }
+        std::cout << std::left
+                  << std::setw(16) << f.event_type
+                  << std::setw(10) << f.severity
+                  << std::setw(48) << path_disp
+                  << std::setw(40) << f.details
+                  << std::endl;
     }
-    int total = static_cast<int>(findings.size());
-
-    std::cout << "=== Baseline Check Summary ===\n"
-              << "Database: " << db_path << "\n"
-              << "Checked at: " << NowIso() << "\n"
-              << "\n"
-              << "Total entries: " << total << "\n"
-              << "  OK:              " << ok_count << "\n"
-              << "  File missing:    " << missing_count << "\n"
-              << "  Baseline tamper: " << tamper_count << "\n";
-
-    // Print details for non-ok entries
-    bool has_issues = (missing_count + tamper_count) > 0;
-    if (has_issues) {
-        std::cout << "\n--- Issues ---\n";
-        for (const auto& f : findings) {
-            if (f.status == CheckStatus::ok) continue;
-            std::string status_str = (f.status == CheckStatus::file_missing)
-                                         ? "MISSING"
-                                         : "TAMPER";
-            std::cout << "[" << status_str << "] " << f.file_path << "\n";
-            for (const auto& diff : f.diffs) {
-                std::cout << "  - " << diff << "\n";
-            }
-        }
-    } else {
-        std::cout << "\nAll baseline entries are consistent. No issues found.\n";
-    }
+    std::cout << "\nTotal deviations: " << findings.size() << std::endl;
 }
 
-// Generate HTML report
-bool GenerateCheckHtml(const std::vector<CheckFinding>& findings,
-                       const std::string& output_path,
-                       const std::string& db_path) {
-    int ok_count = 0, missing_count = 0, tamper_count = 0;
+// ── output: JSON ─────────────────────────────────────────────────────
+
+void PrintJson(const std::vector<CheckFinding>& findings) {
+    json arr = json::array();
     for (const auto& f : findings) {
-        switch (f.status) {
-            case CheckStatus::ok:            ++ok_count;     break;
-            case CheckStatus::file_missing:  ++missing_count; break;
-            case CheckStatus::baseline_tamper: ++tamper_count; break;
+        json obj;
+        obj["file_path"]   = f.file_path;
+        obj["event_type"]  = f.event_type;
+        obj["severity"]    = f.severity;
+        obj["expected"]    = f.expected;
+        obj["actual"]      = f.actual;
+        obj["details"]     = f.details;
+        obj["checked_at"]  = NowIso();
+        arr.push_back(obj);
+    }
+    std::cout << arr.dump(2) << std::endl;
+}
+
+// ── output: HTML (reuse ReportGenerator) ─────────────────────────────
+
+bool WriteHtmlReport(const std::vector<CheckFinding>& findings,
+                     const std::string& output_path) {
+    std::vector<CheckResult> results;
+    for (const auto& f : findings) {
+        CheckResult cr;
+        cr.rule_id   = kRuleId;
+        cr.rule_name = kRuleName;
+        cr.file_path = f.file_path;
+        cr.expected  = f.expected;
+        cr.actual    = f.actual;
+        cr.passed    = false;
+        cr.severity  = f.severity;
+        results.push_back(cr);
+    }
+    ReportGenerator rg;
+    return rg.GenerateCheckHtml(results, output_path);
+}
+
+// ── alerts: write to DB + optional DingTalk ──────────────────────────
+
+void WriteAlerts(const std::vector<CheckFinding>& findings,
+                 const CheckOptions& options) {
+    if (findings.empty()) return;
+
+    AlertManager alert_mgr;
+
+    // Only load DingTalk config when --send-webhook AND --config provided
+    if (options.send_webhook && !options.config_path.empty()) {
+        if (!ends_with(options.config_path, ".yaml") &&
+            !ends_with(options.config_path, ".yml")) {
+            std::cerr << "Warning: only YAML config is supported, "
+                      << "DingTalk will not be available\n";
+        } else {
+            try {
+                Config config = parseYamlFile(options.config_path);
+                alert_mgr.LoadConfig(config.alert, config.db);
+            } catch (const std::exception& ex) {
+                std::cerr << "Warning: failed to load config '"
+                          << options.config_path << "': " << ex.what()
+                          << "\n  Alerts will be persisted to DB but "
+                          << "DingTalk will not be available.\n";
+            }
+        }
+    } else if (options.send_webhook && options.config_path.empty()) {
+        std::cerr << "Warning: --send-webhook requires --config to specify "
+                  << "YAML config with DingTalk webhook.\n"
+                  << "  Alerts will be persisted to DB but DingTalk "
+                  << "will not be sent.\n";
+    }
+
+    alert_mgr.SetDB(nullptr);  // we'll use our own DB handle
+    BaselineDB alert_db(options.db_path);
+    alert_mgr.SetDB(&alert_db);
+
+    for (const auto& f : findings) {
+        AlertEvent event;
+        event.rule_id      = kRuleId;
+        event.rule_name    = std::string("[离线基线核查] ") + kRuleName;
+        event.severity     = f.severity;
+        event.file_path    = f.file_path;
+        event.expected     = f.expected;
+        event.actual       = f.actual;
+        event.event_type   = f.event_type;
+        event.action_taken = "report_only";
+        event.timestamp    = NowIso();
+
+        if (options.send_webhook && alert_mgr.IsEnabled()) {
+            alert_mgr.SendDingTalk(event);   // handles throttle + DB write
+        } else {
+            // Persist to DB only (no DingTalk)
+            AlertRecord record;
+            record.rule_id      = event.rule_id;
+            record.rule_name    = event.rule_name;
+            record.severity     = event.severity;
+            record.file_path    = event.file_path;
+            record.expected     = event.expected;
+            record.actual       = event.actual;
+            record.event_type   = event.event_type;
+            record.action_taken = event.action_taken;
+            record.dingtalk_sent = false;
+            record.recorded_at  = event.timestamp;
+            alert_db.SaveAlert(record);
         }
     }
-    int total = static_cast<int>(findings.size());
-    double pass_rate = total > 0 ? (ok_count * 100.0 / total) : 0.0;
-
-    std::ofstream fs(output_path);
-    if (!fs.is_open()) {
-        return false;
-    }
-
-    fs << R"(<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>baseline-guard 基线一致性核查报告</title>
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;max-width:960px;margin:40px auto;padding:0 20px;color:#333}
-h1{color:#1a1a1a;border-bottom:2px solid #0366d6;padding-bottom:10px}
-.summary{display:flex;gap:20px;margin:20px 0}
-.summary-box{flex:1;padding:20px;border-radius:8px;text-align:center}
-.summary-box.total{background:#f6f8fa}
-.summary-box.ok{background:#d4edda;color:#155724}
-.summary-box.missing{background:#fff3cd;color:#856404}
-.summary-box.tamper{background:#f8d7da;color:#721c24}
-.summary-box h2{margin:0;font-size:36px}
-.summary-box p{margin:5px 0 0;color:#666}
-table{width:100%;border-collapse:collapse;margin:20px 0;font-size:14px}
-th{background:#f6f8fa;padding:12px;text-align:left;border-bottom:2px solid #dfe2e5;font-weight:600}
-td{padding:10px 12px;border-bottom:1px solid #eaecef;vertical-align:top}
-tr:hover{background:#f6f8fa}
-.status-ok{color:#28a745;font-weight:600}
-.status-missing{color:#ffc107;font-weight:600}
-.status-tamper{color:#dc3545;font-weight:600}
-.diff-item{margin:2px 0;font-size:13px;color:#555}
-.meta{color:#666;font-size:13px;margin-bottom:20px}
-.footer{margin-top:40px;padding-top:20px;border-top:1px solid #eaecef;color:#666;font-size:12px;text-align:center}
-</style>
-</head>
-<body>
-<h1>&#128274; baseline-guard 基线一致性核查报告</h1>
-<p class="meta">)" << EscapeHtml(NowIso()) << R"(</p>
-<p class="meta">Database: )" << EscapeHtml(db_path) << R"(</p>
-
-<div class="summary">
-<div class="summary-box total"><h2>)" << total << R"(</h2><p>检查项总数</p></div>
-<div class="summary-box ok"><h2>)" << ok_count << R"(</h2><p>正常</p></div>
-<div class="summary-box missing"><h2>)" << missing_count << R"(</h2><p>文件消失</p></div>
-<div class="summary-box tamper"><h2>)" << tamper_count << R"(</h2><p>基线篡改</p></div>
-</div>
-<p>通过率: )" << std::fixed << std::setprecision(1) << pass_rate << R"(%</p>
-)";
-
-    // Issues table
-    bool has_issues = (missing_count + tamper_count) > 0;
-    if (has_issues) {
-        fs << R"(<h2>异常详情</h2>
-<table>
-<thead><tr><th>状态</th><th>文件路径</th><th>差异项</th></tr></thead>
-<tbody>
-)";
-        for (const auto& f : findings) {
-            if (f.status == CheckStatus::ok) continue;
-            std::string status_class, status_text;
-            if (f.status == CheckStatus::file_missing) {
-                status_class = "status-missing";
-                status_text = "MISSING";
-            } else {
-                status_class = "status-tamper";
-                status_text = "TAMPER";
-            }
-            fs << "<tr><td class=\"" << status_class << "\">" << status_text << "</td>"
-               << "<td>" << EscapeHtml(f.file_path) << "</td><td>";
-            for (const auto& diff : f.diffs) {
-                fs << "<div class=\"diff-item\">- " << EscapeHtml(diff) << "</div>";
-            }
-            fs << "</td></tr>\n";
-        }
-        fs << "</tbody></table>\n";
-    } else {
-        fs << "<p style=\"color:#28a745;font-weight:600\">&#10004; 所有基线条目与磁盘文件一致，未发现异常。</p>\n";
-    }
-
-    fs << R"(<div class="footer">baseline-guard baseline check &mdash; generated at )"
-       << EscapeHtml(NowIso()) << "</div>\n</body>\n</html>\n";
-
-    return true;
 }
 
 }  // namespace
+
+// ── entry point ──────────────────────────────────────────────────────
 
 int RunBaselineCheck(int argc, char* argv[]) {
     CheckOptions options;
@@ -326,36 +367,67 @@ int RunBaselineCheck(int argc, char* argv[]) {
 
     try {
         BaselineDB db(options.db_path);
-        auto entries = db.GetAllBaselineEntries();
 
-        if (entries.empty()) {
-            std::cout << "No baseline entries found in database. Nothing to check.\n";
+        // Use ListBaselineEntries to support path-filter
+        ListResult lr = db.ListBaselineEntries(options.path_filter, 0, 0);
+
+        if (lr.entries.empty()) {
+            if (options.json_output) {
+                std::cout << "[]" << std::endl;
+            } else {
+                std::cout << "No baseline entries found"
+                          << (options.path_filter.empty()
+                                  ? "."
+                                  : " matching '" + options.path_filter + "'.")
+                          << std::endl;
+            }
             return 0;
         }
 
+        // Compare each entry against disk
         std::vector<CheckFinding> findings;
-        findings.reserve(entries.size());
-        for (const auto& entry : entries) {
-            findings.push_back(CheckOneEntry(entry));
+        for (const auto& entry : lr.entries) {
+            CheckEntry ce;
+            ce.file_path    = entry.file_path;
+            ce.file_type    = entry.file_type;
+            ce.hash         = entry.hash;
+            ce.permission   = entry.permission;
+            ce.uid          = entry.uid;
+            ce.gid          = entry.gid;
+            ce.owner        = entry.owner;
+            ce.grp          = entry.grp;
+            ce.file_size    = entry.file_size;
+            ce.mtime        = entry.mtime;
+            ce.snapshot_id  = entry.snapshot_id;
+            ce.label        = entry.label;
+            ce.recorded_at  = entry.recorded_at;
+
+            CheckFinding f = CheckOneEntry(ce);
+            if (!f.event_type.empty()) {
+                findings.push_back(std::move(f));
+            }
         }
 
-        // Output
-        if (!options.output_file.empty()) {
-            if (!GenerateCheckHtml(findings, options.output_file, options.db_path)) {
+        // 1. Write alerts to DB (always, regardless of output mode)
+        WriteAlerts(findings, options);
+
+        // 2. Output
+        if (options.json_output) {
+            PrintJson(findings);
+        } else if (!options.report_html.empty()) {
+            if (!WriteHtmlReport(findings, options.report_html)) {
                 std::cerr << "Error: failed to generate HTML report: "
-                          << options.output_file << "\n";
+                          << options.report_html << "\n";
                 return 1;
             }
-            std::cout << "Check report generated: " << options.output_file << "\n";
+            // --report_html: console does NOT print deviation details
+            std::cout << "Check report generated: " << options.report_html << "\n";
+            std::cout << "Deviations found: " << findings.size() << "\n";
+        } else {
+            PrintConsoleTable(findings);
         }
-        PrintConsoleSummary(findings, options.db_path);
 
-        // Return non-zero if issues found
-        bool has_issues = std::any_of(findings.begin(), findings.end(),
-                                       [](const CheckFinding& f) {
-                                           return f.status != CheckStatus::ok;
-                                       });
-        return has_issues ? 1 : 0;
+        return findings.empty() ? 0 : 1;
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";
         return 1;
