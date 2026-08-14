@@ -415,7 +415,14 @@ int main(int argc, char *argv[]) {
                 // 无 --db: 走原有 YAML 监控流程（需要 -c config）
                 cmd = "monitor";
             } else {
-                // 有 --db: 直接执行基线实时监控
+                // 有 --db: 先检查数据库文件是否存在，避免启动后才报错
+                if (access(monitor_db_path.c_str(), R_OK) != 0) {
+                    fprintf(stderr, "Error: baseline DB not found or not readable: %s\n",
+                            monitor_db_path.c_str());
+                    return 1;
+                }
+
+                // 直接执行基线实时监控
                 Logger::init("/var/log/baseline-guard");
                 spdlog::info("[service_start] baseline-guard monitor --db {} starting, pid={}",
                              monitor_db_path, getpid());
