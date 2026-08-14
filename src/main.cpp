@@ -374,6 +374,7 @@ int main(int argc, char *argv[]) {
         } else if (arg == "monitor") {
             // 解析 monitor 子命令的参数
             std::string monitor_db_path;
+            bool skip_boot_check = false;
             int j = i + 1;
             while (j < argc) {
                 std::string subarg = argv[j];
@@ -393,10 +394,13 @@ int main(int argc, char *argv[]) {
                     config_path = argv[++j];
                 } else if (subarg.rfind("--config=", 0) == 0) {
                     config_path = subarg.substr(std::string("--config=").size());
+                } else if (subarg == "--skip-boot-baseline-check") {
+                    skip_boot_check = true;
                 } else if (subarg == "-h" || subarg == "--help") {
                     printf("Usage: baseline-guard monitor [options]\n");
                     printf("Options:\n");
                     printf("  --db PATH    SQLite baseline DB path (enables baseline comparison)\n");
+                    printf("  --skip-boot-baseline-check   skip full baseline check at startup\n");
                     printf("  -c PATH      YAML config file (optional when --db is used)\n");
                     printf("  -h, --help   display this message\n");
                     return 0;
@@ -441,7 +445,7 @@ int main(int argc, char *argv[]) {
                 signal(SIGHUP, sighup_handler);
                 int ret = 0;
                 while (true) {
-                    ret = do_monitor(config, alert_mgr, monitor_db_path);
+                    ret = do_monitor(config, alert_mgr, monitor_db_path, skip_boot_check);
                     if (!g_reload) {
                         break;
                     }

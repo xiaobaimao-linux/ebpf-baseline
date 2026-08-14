@@ -353,7 +353,8 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     return 0;
 }
 
-int do_monitor(const Config& config, AlertManager &alert_mgr, const std::string& baseline_db_path) {
+int do_monitor(const Config& config, AlertManager &alert_mgr,
+               const std::string& baseline_db_path, bool skip_boot_check) {
     struct lsm_file_bpf *skel;
     int err;
 
@@ -433,6 +434,21 @@ int do_monitor(const Config& config, AlertManager &alert_mgr, const std::string&
             }
             spdlog::info("[baseline_monitor] registered {} baseline inodes to eBPF map",
                          baseline_registered);
+
+            // ── 开机全基线自检（默认执行，--skip-boot-baseline-check 跳过）──
+            if (!skip_boot_check) {
+                int boot_devs = 0;
+                for (const auto& [ino, entry] : g_inode_to_baseline) {
+                    std::vector<BaselineDeviation> devs = CompareWithBaseline(entry, entry.file_path);
+                    for (const auto& dev : devs) {
+                        HandleBaselineDeviation(dev, entry.file_path, "-", 0, alert_mgr);
+                        ++boot_devs;
+                    }
+                }
+                spdlog::info("[baseline_boot_check] completed, {} deviations found", boot_devs);
+            } else {
+                spdlog::info("[baseline_boot_check] skipped (--skip-boot-baseline-check)");
+            }
         } catch (const std::exception& ex) {
             spdlog::error("[baseline_monitor] failed to open baseline DB: {}", ex.what());
             delete baseline_db;
@@ -456,11 +472,6 @@ int do_monitor(const Config& config, AlertManager &alert_mgr, const std::string&
     int count = 0;
     // 每1小时(约36000次poll)触发一次保留策略清理
     const int RETENTION_INTERVAL = 36000;  // 100ms * 36000 = 3600s = 1h
-    // 每10秒触发一次完整基线比对（100ms * 100 = 10s）
-    // 主要用途：检测文件删除（eBPF 无 unlink hook，无法实时捕获）
-    // 兜底用途：捕获 eBPF 未触发的离线篡改（如直接磁盘写入）
-    // 注：chmod/chown 已由 eBPF path_chmod/path_chown hook 实时拦截
-    const int BASELINE_SCAN_INTERVAL = 100;
     while (running) {
         count++;
         err = ring_buffer__poll(rb, 100);
@@ -473,16 +484,6 @@ int do_monitor(const Config& config, AlertManager &alert_mgr, const std::string&
         if (count % RETENTION_INTERVAL == 0) {
             int deleted = alert_mgr.RunRetention();
             (void)deleted;  // 避免unused警告
-        }
-
-        // 定期执行完整基线比对（兜底：文件删除/离线篡改）
-        if (!g_inode_to_baseline.empty() && count % BASELINE_SCAN_INTERVAL == 0) {
-            for (const auto& [ino, entry] : g_inode_to_baseline) {
-                std::vector<BaselineDeviation> devs = CompareWithBaseline(entry, entry.file_path);
-                for (const auto& dev : devs) {
-                    HandleBaselineDeviation(dev, entry.file_path, "-", 0, alert_mgr);
-                }
-            }
         }
     }
 
