@@ -209,11 +209,86 @@ void on_check_mismatch_detected(const Rule& rule,
     alert_mgr.SendDingTalk(evt);
 }
 
+// ── chmod/chown 事件处理（--db 模式下）──────────────────────────────
+// eBPF 拦截到 chmod/chown 后，直接用事件中的新值与基线比对
+// 无需 stat 磁盘文件（LSM hook 在操作前触发，磁盘上仍是旧值）
+static void handle_chmod_chown_event(const struct event *e,
+                                      AlertManager& alert_mgr) {
+    auto it_bl = g_inode_to_baseline.find(e->ino);
+    if (it_bl == g_inode_to_baseline.end())
+        return;
+
+    const CheckEntry& baseline = it_bl->second;
+    const std::string& file_path = baseline.file_path;
+    std::string proc_name(reinterpret_cast<const char*>(e->comm), 16);
+    // 去除尾部 \0
+    auto null_pos = proc_name.find('\0');
+    if (null_pos != std::string::npos) proc_name.resize(null_pos);
+
+    if (e->event_type == EVENT_CHMOD) {
+        std::string actual_perm = mode_to_string(e->new_mode & 0777);
+        if (actual_perm != baseline.permission) {
+            BaselineDeviation dev;
+            dev.event_type = "perm_changed";
+            dev.severity   = "medium";
+            dev.expected   = "mode=" + baseline.permission;
+            dev.actual     = "mode=" + actual_perm;
+            HandleBaselineDeviation(dev, file_path, proc_name, e->pid, alert_mgr);
+        }
+    } else if (e->event_type == EVENT_CHOWN) {
+        bool uid_diff = (static_cast<int64_t>(e->new_uid) != baseline.uid);
+        bool gid_diff = (static_cast<int64_t>(e->new_gid) != baseline.gid);
+        if (uid_diff || gid_diff) {
+            BaselineDeviation dev;
+            dev.event_type = "own_changed";
+            dev.severity   = "medium";
+            std::string exp_parts, act_parts;
+            if (uid_diff) {
+                exp_parts += "uid=" + std::to_string(baseline.uid);
+                act_parts += "uid=" + std::to_string(e->new_uid);
+            }
+            if (gid_diff) {
+                if (!exp_parts.empty()) exp_parts += ", ";
+                exp_parts += "gid=" + std::to_string(baseline.gid);
+                if (!act_parts.empty()) act_parts += ", ";
+                act_parts += "gid=" + std::to_string(e->new_gid);
+            }
+            dev.expected = exp_parts;
+            dev.actual   = act_parts;
+            HandleBaselineDeviation(dev, file_path, proc_name, e->pid, alert_mgr);
+        }
+    }
+}
+
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)data_sz;
 
     auto* alert_mgr = static_cast<AlertManager*>(ctx);
     auto* e = static_cast<struct event *>(data);
+
+    // ── chmod/chown/unlink 实时检测（--db 模式下，eBPF 直接拦截）────────
+    if (!g_inode_to_baseline.empty() && alert_mgr != nullptr) {
+        if (e->event_type == EVENT_CHMOD || e->event_type == EVENT_CHOWN) {
+            handle_chmod_chown_event(e, *alert_mgr);
+            return 0;
+        }
+        if (e->event_type == EVENT_UNLINK) {
+            auto it_bl = g_inode_to_baseline.find(e->ino);
+            if (it_bl != g_inode_to_baseline.end()) {
+                const std::string& file_path = it_bl->second.file_path;
+                std::string proc_name(reinterpret_cast<const char*>(e->comm), 16);
+                auto null_pos = proc_name.find('\0');
+                if (null_pos != std::string::npos) proc_name.resize(null_pos);
+                BaselineDeviation dev;
+                dev.event_type = "missing";
+                dev.severity   = "high";
+                dev.expected   = "file exists";
+                dev.actual     = "file deleted (unlink detected by eBPF)";
+                HandleBaselineDeviation(dev, file_path, proc_name, e->pid, *alert_mgr);
+            }
+            return 0;
+        }
+    }
 
     // ── 原有 YAML 规则匹配逻辑（不变）──────────────────────────────
     auto it_rule = g_inode_to_rule.find(e->ino);
@@ -268,8 +343,8 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
             // 使用基线中存储的完整路径（不跟随 symlink）
             const std::string& full_path = baseline.file_path;
 
-            BaselineDeviation dev = CompareWithBaseline(baseline, full_path);
-            if (!dev.event_type.empty()) {
+            std::vector<BaselineDeviation> devs = CompareWithBaseline(baseline, full_path);
+            for (const auto& dev : devs) {
                 HandleBaselineDeviation(dev, full_path, e->comm, e->pid, *alert_mgr);
             }
         }
@@ -381,8 +456,11 @@ int do_monitor(const Config& config, AlertManager &alert_mgr, const std::string&
     int count = 0;
     // 每1小时(约36000次poll)触发一次保留策略清理
     const int RETENTION_INTERVAL = 36000;  // 100ms * 36000 = 3600s = 1h
-    // 每60秒触发一次 missing 检测（100ms * 600 = 60s）
-    const int MISSING_CHECK_INTERVAL = 600;
+    // 每10秒触发一次完整基线比对（100ms * 100 = 10s）
+    // 主要用途：检测文件删除（eBPF 无 unlink hook，无法实时捕获）
+    // 兜底用途：捕获 eBPF 未触发的离线篡改（如直接磁盘写入）
+    // 注：chmod/chown 已由 eBPF path_chmod/path_chown hook 实时拦截
+    const int BASELINE_SCAN_INTERVAL = 100;
     while (running) {
         count++;
         err = ring_buffer__poll(rb, 100);
@@ -397,17 +475,11 @@ int do_monitor(const Config& config, AlertManager &alert_mgr, const std::string&
             (void)deleted;  // 避免unused警告
         }
 
-        // 定期执行基线 missing 检测（文件被删除的情况，eBPF 无法捕获）
-        if (!g_inode_to_baseline.empty() && count % MISSING_CHECK_INTERVAL == 0) {
+        // 定期执行完整基线比对（兜底：文件删除/离线篡改）
+        if (!g_inode_to_baseline.empty() && count % BASELINE_SCAN_INTERVAL == 0) {
             for (const auto& [ino, entry] : g_inode_to_baseline) {
-                struct stat st;
-                if (lstat(entry.file_path.c_str(), &st) != 0) {
-                    // 文件不存在 -> missing 告警
-                    BaselineDeviation dev;
-                    dev.event_type = "missing";
-                    dev.severity = "high";
-                    dev.expected = "file exists";
-                    dev.actual = "file missing";
+                std::vector<BaselineDeviation> devs = CompareWithBaseline(entry, entry.file_path);
+                for (const auto& dev : devs) {
                     HandleBaselineDeviation(dev, entry.file_path, "-", 0, alert_mgr);
                 }
             }

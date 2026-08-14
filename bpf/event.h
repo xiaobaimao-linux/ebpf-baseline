@@ -10,6 +10,10 @@
 
 #define EVENT_READ 1
 #define EVENT_WRITE 2
+#define EVENT_CHMOD 3
+#define EVENT_CHOWN 4
+#define EVENT_UNLINK 5
+#define EVENT_UNLINK 5
 
 struct monitor_rule {
     unsigned char action;
@@ -23,6 +27,10 @@ struct event {
     unsigned long ino; // inode 编号
     int mask;
     unsigned char action; // 0-4
+    unsigned char event_type; // 0=read/write, 3=chmod, 4=chown
+    unsigned int new_mode;    // chmod: new mode
+    unsigned int new_uid;     // chown: new uid
+    unsigned int new_gid;     // chown: new gid
 };
 
 #endif

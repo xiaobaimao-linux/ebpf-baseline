@@ -4,6 +4,7 @@
 #include "baseline_db.hpp"
 
 #include <string>
+#include <vector>
 
 // 基线实时监控告警标识（与 yaml-rule / baseline-check 区分）
 constexpr const char* kBaselineRuleId   = "baseline";
@@ -20,10 +21,11 @@ struct BaselineDeviation {
 };
 
 // 比对单个文件的当前磁盘状态与基线条目
+// 返回零个或多个偏差（同一文件可能同时 hash_changed + perm_changed）
 // 逻辑与 baseline_check.cpp::CheckOneEntry 严格一致：
 //   lstat -> missing / compute_sha256 -> hash_changed / 比对 mode+uid+gid -> perm_changed
-BaselineDeviation CompareWithBaseline(const CheckEntry& baseline,
-                                       const std::string& file_path);
+std::vector<BaselineDeviation> CompareWithBaseline(const CheckEntry& baseline,
+                                                    const std::string& file_path);
 
 // 处理一次基线偏差：打印日志 + 通过 AlertManager 落库 + 钉钉推送
 void HandleBaselineDeviation(const BaselineDeviation& dev,

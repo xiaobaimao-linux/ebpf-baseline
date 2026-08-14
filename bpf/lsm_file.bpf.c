@@ -95,3 +95,126 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
 
     return 0;
 }
+
+SEC("lsm/path_chmod")
+int BPF_PROG(file_chmod_hook, const struct path *path, umode_t mode) {
+    char comm[16] = {};
+    unsigned long ino;
+    char fname[256] = {};
+
+    struct dentry *dentry = BPF_CORE_READ(path, dentry);
+    if (!dentry)
+        return 0;
+
+    ino = BPF_CORE_READ(dentry, d_inode, i_ino);
+
+    // 查规则（存在即监控）
+    struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
+    if (!rule)
+        return 0;
+
+    // 发送 chmod 事件
+    struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->pid = bpf_get_current_pid_tgid() >> 32;
+    __builtin_memcpy(e->comm, comm, sizeof(comm));
+    e->ino = ino;
+    e->action = rule->action;
+    e->event_type = EVENT_CHMOD;
+    e->new_mode = mode;
+    e->new_uid = 0;
+    e->new_gid = 0;
+    e->mask = 0;
+
+    const unsigned char *name_ptr = BPF_CORE_READ(dentry, d_name.name);
+    if (name_ptr)
+        bpf_probe_read_str(e->path, sizeof(e->path), name_ptr);
+
+    bpf_ringbuf_submit(e, 0);
+    bpf_printk("CHMOD detected for inode %lu, new mode: %u\n", ino, mode);
+
+    return 0;
+}
+
+SEC("lsm/path_chown")
+int BPF_PROG(file_chown_hook, const struct path *path, unsigned int uid, unsigned int gid) {
+    char comm[16] = {};
+    unsigned long ino;
+
+    struct dentry *dentry = BPF_CORE_READ(path, dentry);
+    if (!dentry)
+        return 0;
+
+    ino = BPF_CORE_READ(dentry, d_inode, i_ino);
+
+    // 查规则（存在即监控）
+    struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
+    if (!rule)
+        return 0;
+
+    // 发送 chown 事件
+    struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->pid = bpf_get_current_pid_tgid() >> 32;
+    __builtin_memcpy(e->comm, comm, sizeof(comm));
+    e->ino = ino;
+    e->action = rule->action;
+    e->event_type = EVENT_CHOWN;
+    e->new_mode = 0;
+    e->new_uid = uid;
+    e->new_gid = gid;
+    e->mask = 0;
+
+    const unsigned char *name_ptr = BPF_CORE_READ(dentry, d_name.name);
+    if (name_ptr)
+        bpf_probe_read_str(e->path, sizeof(e->path), name_ptr);
+
+    bpf_ringbuf_submit(e, 0);
+    bpf_printk("CHOWN detected for inode %lu, new uid: %u, gid: %u\n", ino, uid, gid);
+
+    return 0;
+}
+
+SEC("lsm/path_unlink")
+int BPF_PROG(file_unlink_hook, const struct path *path, struct dentry *dentry) {
+    char comm[16] = {};
+    unsigned long ino;
+
+    if (!dentry)
+        return 0;
+
+    ino = BPF_CORE_READ(dentry, d_inode, i_ino);
+
+    // 查规则（存在即监控）
+    struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
+    if (!rule)
+        return 0;
+
+    // 发送 unlink 事件
+    struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->pid = bpf_get_current_pid_tgid() >> 32;
+    __builtin_memcpy(e->comm, comm, sizeof(comm));
+    e->ino = ino;
+    e->action = rule->action;
+    e->event_type = EVENT_UNLINK;
+    e->new_mode = 0;
+    e->new_uid = 0;
+    e->new_gid = 0;
+    e->mask = 0;
+
+    const unsigned char *name_ptr = BPF_CORE_READ(dentry, d_name.name);
+    if (name_ptr)
+        bpf_probe_read_str(e->path, sizeof(e->path), name_ptr);
+
+    bpf_ringbuf_submit(e, 0);
+    bpf_printk("UNLINK detected for inode %lu\n", ino);
+
+    return 0;
+}
