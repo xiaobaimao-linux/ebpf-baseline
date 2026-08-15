@@ -249,7 +249,7 @@ baseline-guard/
 
 baseline check report 截图：
 
-![image-20260815124214195](./docs/pic/baseline-check-report.pngimage-20260815124214195.png)
+![image-20260815124214195](./docs/pic/baseline-check-report.png)
 
 
 monitor report 截图：
