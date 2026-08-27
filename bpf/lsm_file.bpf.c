@@ -28,6 +28,24 @@ struct print_ctx {
     u32 count;
 };
 
+// 定义 per-CPU 丢包统计 Map
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);    // 只有1个计数槽（key=0）
+    __type(key, __u32);
+    __type(value, __u64);     // 64位计数器，避免长时间运行溢出
+} drop_stats SEC(".maps");
+
+// 计数函数
+static __always_inline void inc_drop_count()
+{
+    __u32 key = 0;
+    __u64 *cnt = bpf_map_lookup_elem(&drop_stats, &key);
+    if (cnt) {
+        (*cnt)++;
+    }
+}
+
 extern int bpf_path_d_path(struct path *path, char *buf, int buf_len) __ksym;
 
 SEC("lsm/file_permission")
@@ -73,6 +91,8 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
     // 匹配成功
     struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) {
+        bpf_printk("ringbuf reserve failed\n");
+        inc_drop_count();
         return 0;
     }
 
