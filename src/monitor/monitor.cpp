@@ -376,6 +376,18 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
     }
     spdlog::info("[bpf_program_loaded] BPF LSM program attached successfully, monitoring {} rules", config.rules.size());
 
+    // ── Pin drop_stats map 到 bpffs，供 stats 子命令读取 ──────────
+    {
+        // 确保 bpffs 目录存在
+        (void)mkdir("/sys/fs/bpf/baseline-guard", 0755);
+        int pin_err = bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
+        if (pin_err != 0) {
+            spdlog::warn("[bpf_map_pin] failed to pin drop_stats map: {}", strerror(-pin_err));
+        } else {
+            spdlog::info("[bpf_map_pin] drop_stats map pinned to /sys/fs/bpf/baseline-guard/drop_stats");
+        }
+    }
+
     int fd_actions = bpf_map__fd(skel->maps.monitor_actions);
 
     // 只写入 monitor_actions：同时传递动作和事件掩码
@@ -490,6 +502,10 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
     spdlog::info("[service_stop] monitoring loop exited");
     spdlog::info("Monitoring stopped.");
     ring_buffer__free(rb);
+
+    // 解除 map pin
+    bpf_map__unpin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
+
     lsm_file_bpf__destroy(skel);
 
     // 清理基线资源

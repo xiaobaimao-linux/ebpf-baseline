@@ -13,6 +13,7 @@
 #include "monitor.hpp"
 #include "utils.hpp"
 #include "report_generator.hpp"
+#include "stats.hpp"
 
 
 #include "spdlog/spdlog.h"
@@ -195,6 +196,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // stats 子命令：读取 eBPF map 统计信息（独立于 config/DB）
+    if (argc >= 2 && std::string(argv[1]) == "stats") {
+        return RunStats(argc - 2, argv + 2);
+    }
+
     // 设置全局日志级别（默认是 info，低于它的 debug/trace 不会输出）
     spdlog::set_level(spdlog::level::debug);
 
@@ -237,6 +243,7 @@ int main(int argc, char *argv[]) {
             printf("  baseline clean        clean orphan baseline entries\n");
             printf("  alerts                show alert history from SQLite\n");
             printf("  report                export monitor events to HTML\n");
+            printf("  stats --drop          show eBPF ring buffer drop statistics\n");
             return 0;
         } else if (arg == "-C" || arg == "--check") {
             cmd = "check";

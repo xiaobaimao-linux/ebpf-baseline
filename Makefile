@@ -11,6 +11,7 @@ INCLUDE_DIRS = -I./include \
                -I./src/common \
                -I./src/monitor \
                -I./src/report \
+               -I./src/stats \
                -I./src/storage \
                -I./bpf
 
@@ -43,8 +44,9 @@ MAIN_SRCS = src/main.cpp \
             src/report/report_generator.cpp \
             src/storage/baseline_db.cpp
 MONITOR_SRC = src/monitor/monitor.cpp
+STATS_SRC = src/stats/stats.cpp
 
-OBJS = $(MAIN_SRCS:.cpp=.o) $(MONITOR_SRC:.cpp=.o)
+OBJS = $(MAIN_SRCS:.cpp=.o) $(MONITOR_SRC:.cpp=.o) $(STATS_SRC:.cpp=.o)
 DEPS = $(OBJS:.o=.d)
 
 .PHONY: all clean test test-monitor test-snapshot
