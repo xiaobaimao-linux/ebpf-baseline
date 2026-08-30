@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unordered_map>
+#include <vector>
 #include <sstream>
 
 // 包含生成的skeleton头文件
@@ -261,25 +262,31 @@ static void handle_chmod_chown_event(const struct event *e,
     }
 }
 
-// ── 监控上下文：聚合 AlertManager + 水位背压控制器 ────────────────
+// ── 监控上下文：聚合 AlertManager + 水位背压控制器 + 事件批量缓冲 ──
+static constexpr size_t kMaxBatchSize = 1024;
+
 struct MonitorContext {
-    AlertManager*            alert_mgr = nullptr;
+    AlertManager*            alert_mgr    = nullptr;
     WatermarkBackpressure*   backpressure = nullptr;
+    std::vector<struct event> event_batch;
+    size_t                   dropped_count = 0;
 };
 
 // ── 核心事件处理逻辑（前向声明）─────────────────────────────────────
 static void process_event_core(struct event* e, MonitorContext* mctx);
 
-// ── 事件回调：内核态已做背压决策，能到达用户态的事件均需处理 ───────
+// ── 事件回调：将事件拷贝到批量缓冲区，由 FlushEventBatch 统一处理 ──
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)data_sz;
 
     auto* mctx = static_cast<MonitorContext*>(ctx);
-    auto* e = static_cast<struct event *>(data);
+    auto* e    = static_cast<struct event *>(data);
 
-    // 内核态 eBPF 已根据水位+severity做了背压（丢弃/批量/实时）
-    // 能到达用户态的事件均需正常处理
-    process_event_core(e, mctx);
+    if (mctx->event_batch.size() < kMaxBatchSize) {
+        mctx->event_batch.push_back(*e);
+    } else {
+        mctx->dropped_count++;
+    }
 
     return 0;
 }
@@ -371,6 +378,14 @@ static void process_event_core(struct event* e, MonitorContext* mctx) {
             }
         }
     }
+}
+
+// ── 批量处理：遍历缓冲区中的所有事件，逐条调用核心处理逻辑 ────────
+static void FlushEventBatch(MonitorContext* mctx) {
+    for (auto& e : mctx->event_batch) {
+        process_event_core(&e, mctx);
+    }
+    mctx->event_batch.clear();
 }
 
 int do_monitor(const Config& config, AlertManager &alert_mgr,
@@ -535,6 +550,9 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
             break;
         }
 
+        // 批量处理本轮 poll 收集到的事件
+        FlushEventBatch(&mctx);
+
         // 定期更新水位并写入 eBPF watermark_level map
         if (count % WATERMARK_INTERVAL == 0) {
             backpressure.UpdateUtilization();
@@ -552,10 +570,18 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
         }
     }
 
+    // 处理退出时残余的缓冲事件
+    FlushEventBatch(&mctx);
+
     // 输出水位统计
     spdlog::info("[watermark] final utilization={:.1f}% level={}",
                  backpressure.GetUtilization(),
                  WatermarkBackpressure::LevelToString(backpressure.GetWatermarkLevel()));
+
+    if (mctx.dropped_count > 0) {
+        spdlog::warn("[batch] {} events dropped (batch overflow, max_batch_size={})",
+                     mctx.dropped_count, kMaxBatchSize);
+    }
 
     spdlog::info("[service_stop] monitoring loop exited");
     spdlog::info("Monitoring stopped.");
