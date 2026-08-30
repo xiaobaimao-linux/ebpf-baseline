@@ -15,9 +15,11 @@
 #define EVENT_UNLINK 5
 #define EVENT_UNLINK 5
 
+// 监控规则：由用户态写入 eBPF monitor_actions map，作为 value 存储
+// eBPF hook 通过 inode 查到该结构后，据此决定是否拦截/告警
 struct monitor_rule {
-    unsigned char action;
-    unsigned char events_mask;
+    unsigned char action;       // 触发动作：ACTION_LOG(0) / ACTION_ALERT(1) / ACTION_BLOCK(3) 等
+    unsigned char events_mask;  // 事件掩码（位运算）：EVENT_READ(1) | EVENT_WRITE(2) 等
 };
 
 struct event {

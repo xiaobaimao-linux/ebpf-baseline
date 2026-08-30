@@ -84,7 +84,7 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
     // 只在规则声明的事件位上发事件
     if (!((rule->events_mask & EVENT_READ) && (mask & EVENT_READ)) &&
         !((rule->events_mask & EVENT_WRITE) && (mask & EVENT_WRITE))) {
-        bpf_printk("NO READ\WRITE, PASS: %s\n", fname);
+        bpf_printk("NO READ/WRITE, PASS: %s\n", fname);
         return 0;
     }
 
