@@ -59,6 +59,26 @@ string actionToString(Action action) {
     }
 }
 
+// 将 severity 字符串转为数值
+unsigned char stringToSeverity(const string& s) {
+    if (s == "low")      return SEVERITY_LOW;
+    if (s == "medium")   return SEVERITY_MEDIUM;
+    if (s == "high")     return SEVERITY_HIGH;
+    if (s == "critical") return SEVERITY_CRITICAL;
+    return SEVERITY_UNKNOWN;  // 未知等级
+}
+
+// 将 severity 数值转为字符串
+string severityToString(unsigned char sev) {
+    switch (sev) {
+    case SEVERITY_LOW:      return "low";
+    case SEVERITY_MEDIUM:   return "medium";
+    case SEVERITY_HIGH:     return "high";
+    case SEVERITY_CRITICAL: return "critical";
+    default:                return "unknown";
+    }
+}
+
 void compute_inodes(Config &config) {
     for (auto &rule : config.rules) {
         struct stat st;
@@ -146,7 +166,14 @@ Config parseYamlFile(const string &filename) {
             Rule rule;
 
             rule.id = item["id"] ? item["id"].as<string>() : "";
-            rule.severity = item["severity"] ? item["severity"].as<string>() : "";
+            if (item["severity"]) {
+                rule.severity = stringToSeverity(item["severity"].as<string>());
+                // 未知字符串回退到 MEDIUM
+                if (rule.severity == SEVERITY_UNKNOWN) {
+                    rule.severity = SEVERITY_MEDIUM;
+                }
+            }
+            // 否则保持默认值 SEVERITY_MEDIUM
             string name = item["name"] ? item["name"].as<string>() : "";
             if (!rule.id.empty() && !name.empty()) {
                 rule.name = rule.id + ": " + name;

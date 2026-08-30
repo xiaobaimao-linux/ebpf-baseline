@@ -101,7 +101,7 @@ static void do_file_check(const Rule& rule, BaselineDB& db, std::vector<CheckRes
     r.expected = mode_to_string(rule.check_expected);
     r.actual = mode_to_string(actual_mode);
     r.passed = !rule_failed;
-    r.severity = rule.severity;
+    r.severity = severityToString(rule.severity);
     results.push_back(r);
 
     spdlog::info("[baseline_created] path={}, permission={}, hash={}, recorded_at={}",
@@ -161,7 +161,7 @@ static void do_kernel_param_check(const Rule& rule, BaselineDB& db, std::vector<
     r.expected = rule.check_operator + " " + expected_str;
     r.actual = actual_str;
     r.passed = !rule_failed;
-    r.severity = rule.severity;
+    r.severity = severityToString(rule.severity);
     results.push_back(r);
 
     spdlog::info("[kernel_param_check] param={}, actual={}, expected_op={}, expected_val={}, passed={}",

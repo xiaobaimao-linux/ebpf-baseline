@@ -38,6 +38,12 @@ Action stringToAction(const string& str);
 // 将 Action 枚举转为字符串
 string actionToString(Action action);
 
+// 将 severity 字符串转为数值 (SEVERITY_LOW ~ SEVERITY_CRITICAL)
+unsigned char stringToSeverity(const std::string& s);
+
+// 将 severity 数值转为字符串
+std::string severityToString(unsigned char sev);
+
 // 解析 YAML 文件，返回完整配置对象
 Config parseYamlFile(const string& filename);
 

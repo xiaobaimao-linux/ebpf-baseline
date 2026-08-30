@@ -17,7 +17,7 @@ enum class Action {
 
 struct Rule {
     std::string id;
-    std::string severity;
+    unsigned char severity = SEVERITY_MEDIUM;  // SEVERITY_LOW(0) ~ SEVERITY_CRITICAL(3)
     std::string name;
 
     unsigned long ino = 0;

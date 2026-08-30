@@ -1,6 +1,7 @@
 #include "monitor.hpp"
 #include "../bpf/event.h"
 #include "monitor_baseline.hpp"
+#include "watermark_backpressure.hpp"
 #include "utils.hpp"
 #include "config.hpp"
 #include "commonfun.hpp"
@@ -118,7 +119,7 @@ void on_violation_detected(const Rule& rule,
     AlertEvent evt;
     evt.rule_id      = rule.id;
     evt.rule_name    = rule.name;
-    evt.severity     = rule.severity;
+    evt.severity     = severityToString(rule.severity);
     evt.file_path    = file_path;
     evt.expected     = mode_to_string(rule.check_expected);
     evt.actual       = actual_mode;
@@ -189,7 +190,7 @@ void on_check_mismatch_detected(const Rule& rule,
     AlertEvent evt;
     evt.rule_id      = rule.id;
     evt.rule_name    = rule.name;
-    evt.severity     = rule.severity;
+    evt.severity     = severityToString(rule.severity);
     evt.file_path    = file_path;
     evt.expected     = (expected_perm ? mode_to_string(rule.check_expected) : "-");
     evt.actual       = (expected_perm ? mode_to_string(actual_mode) : "-");
@@ -260,17 +261,38 @@ static void handle_chmod_chown_event(const struct event *e,
     }
 }
 
+// ── 监控上下文：聚合 AlertManager + 水位背压控制器 ────────────────
+struct MonitorContext {
+    AlertManager*            alert_mgr = nullptr;
+    WatermarkBackpressure*   backpressure = nullptr;
+};
+
+// ── 核心事件处理逻辑（前向声明）─────────────────────────────────────
+static void process_event_core(struct event* e, MonitorContext* mctx);
+
+// ── 事件回调：内核态已做背压决策，能到达用户态的事件均需处理 ───────
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)data_sz;
 
-    auto* alert_mgr = static_cast<AlertManager*>(ctx);
+    auto* mctx = static_cast<MonitorContext*>(ctx);
     auto* e = static_cast<struct event *>(data);
+
+    // 内核态 eBPF 已根据水位+severity做了背压（丢弃/批量/实时）
+    // 能到达用户态的事件均需正常处理
+    process_event_core(e, mctx);
+
+    return 0;
+}
+
+// ── 核心事件处理逻辑 ────────────────────────────────────────────────
+static void process_event_core(struct event* e, MonitorContext* mctx) {
+    AlertManager* alert_mgr = mctx->alert_mgr;
 
     // ── chmod/chown/unlink 实时检测（--db 模式下，eBPF 直接拦截）────────
     if (!g_inode_to_baseline.empty() && alert_mgr != nullptr) {
         if (e->event_type == EVENT_CHMOD || e->event_type == EVENT_CHOWN) {
             handle_chmod_chown_event(e, *alert_mgr);
-            return 0;
+            return;
         }
         if (e->event_type == EVENT_UNLINK) {
             auto it_bl = g_inode_to_baseline.find(e->ino);
@@ -286,7 +308,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
                 dev.actual     = "file deleted (unlink detected by eBPF)";
                 HandleBaselineDeviation(dev, file_path, proc_name, e->pid, *alert_mgr);
             }
-            return 0;
+            return;
         }
     }
 
@@ -349,8 +371,6 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
             }
         }
     }
-
-    return 0;
 }
 
 int do_monitor(const Config& config, AlertManager &alert_mgr,
@@ -376,7 +396,7 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
     }
     spdlog::info("[bpf_program_loaded] BPF LSM program attached successfully, monitoring {} rules", config.rules.size());
 
-    // ── Pin drop_stats map 到 bpffs，供 stats 子命令读取 ──────────
+    // ── Pin drop_stats + watermark_level map 到 bpffs ─────────────
     {
         // 确保 bpffs 目录存在
         (void)mkdir("/sys/fs/bpf/baseline-guard", 0755);
@@ -386,11 +406,18 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
         } else {
             spdlog::info("[bpf_map_pin] drop_stats map pinned to /sys/fs/bpf/baseline-guard/drop_stats");
         }
+        int pin_wm = bpf_map__pin(skel->maps.watermark_level, "/sys/fs/bpf/baseline-guard/watermark_level");
+        if (pin_wm != 0) {
+            spdlog::warn("[bpf_map_pin] failed to pin watermark_level map: {}", strerror(-pin_wm));
+        } else {
+            spdlog::info("[bpf_map_pin] watermark_level map pinned");
+        }
     }
 
-    int fd_actions = bpf_map__fd(skel->maps.monitor_actions);
+    int fd_actions   = bpf_map__fd(skel->maps.monitor_actions);
+    int fd_watermark = bpf_map__fd(skel->maps.watermark_level);
 
-    // 只写入 monitor_actions：同时传递动作和事件掩码
+    // 只写入 monitor_actions：同时传递动作、事件掩码和严重等级
     for (const auto &rule : config.rules) {
         if (!rule.has_monitor)
             continue;
@@ -407,6 +434,7 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
         if (rule.monitor_write) {
             value.events_mask |= EVENT_WRITE;
         }
+        value.severity = rule.severity;
 
         bpf_map_update_elem(fd_actions, &key, &value, BPF_ANY);
     }
@@ -439,6 +467,7 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
                     struct monitor_rule value{};
                     value.action = ACTION_ALERT;
                     value.events_mask = EVENT_READ | EVENT_WRITE;
+                    value.severity = SEVERITY_HIGH;  // 基线事件默认 high
                     if (bpf_map_update_elem(fd_actions, &ino, &value, BPF_NOEXIST) == 0) {
                         ++baseline_registered;
                     }
@@ -469,10 +498,16 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
         }
     }
 
+    // ── 水位背压控制器 ────────────────────────────────────────────
+    WatermarkBackpressure backpressure;
+    MonitorContext mctx;
+    mctx.alert_mgr    = &alert_mgr;
+    mctx.backpressure = &backpressure;
+
     spdlog::info("Monitoring started. Press Ctrl+C to stop.");
 
     struct ring_buffer *rb =
-        ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, &alert_mgr, nullptr);
+        ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, &mctx, nullptr);
 
     if (!rb) {
         spdlog::error("[bpf_program_error] Failed to create ring buffer");
@@ -481,15 +516,33 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
         return 1;
     }
 
+    // 初始化水位背压控制器
+    backpressure.SetRingBuffer(rb);
+    backpressure.SetNumCPUs(libbpf_num_possible_cpus());
+    spdlog::info("[watermark] backpressure controller initialized (cpus={})",
+                 libbpf_num_possible_cpus());
+
     int count = 0;
     // 每1小时(约36000次poll)触发一次保留策略清理
     const int RETENTION_INTERVAL = 36000;  // 100ms * 36000 = 3600s = 1h
+    // 每100次poll(~10s)更新一次水位并写入 eBPF map
+    const int WATERMARK_INTERVAL = 100;
     while (running) {
         count++;
         err = ring_buffer__poll(rb, 100);
         if (err < 0 && err != -EINTR) {
             spdlog::error("[bpf_program_error] Error polling ring buffer: {}", err);
             break;
+        }
+
+        // 定期更新水位并写入 eBPF watermark_level map
+        if (count % WATERMARK_INTERVAL == 0) {
+            backpressure.UpdateUtilization();
+
+            // 将当前水位写入 eBPF map，供内核态背压决策使用
+            __u32 wm_key   = 0;
+            __u32 wm_value = static_cast<__u32>(backpressure.GetWatermarkLevel());
+            bpf_map_update_elem(fd_watermark, &wm_key, &wm_value, BPF_ANY);
         }
 
         // 定期执行保留策略清理
@@ -499,12 +552,18 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
         }
     }
 
+    // 输出水位统计
+    spdlog::info("[watermark] final utilization={:.1f}% level={}",
+                 backpressure.GetUtilization(),
+                 WatermarkBackpressure::LevelToString(backpressure.GetWatermarkLevel()));
+
     spdlog::info("[service_stop] monitoring loop exited");
     spdlog::info("Monitoring stopped.");
     ring_buffer__free(rb);
 
     // 解除 map pin
     bpf_map__unpin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
+    bpf_map__unpin(skel->maps.watermark_level, "/sys/fs/bpf/baseline-guard/watermark_level");
 
     lsm_file_bpf__destroy(skel);
 

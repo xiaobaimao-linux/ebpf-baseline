@@ -36,6 +36,20 @@ struct {
     __type(value, __u64);     // 64位计数器，避免长时间运行溢出
 } drop_stats SEC(".maps");
 
+// 水位等级 Map：由用户态写入当前水位，eBPF 读取后做背压决策
+// key=0, value=当前水位 (WATERMARK_NORMAL/WARNING/HIGH/OVERLOAD)
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} watermark_level SEC(".maps");
+
+// 背压决策返回值
+#define BACKPRESSURE_REALTIME  0   // 实时提交（带唤醒）
+#define BACKPRESSURE_BATCH     1   // 批量提交（禁唤醒 BPF_RB_NO_WAKEUP）
+#define BACKPRESSURE_DROP      2   // 直接丢弃
+
 // 计数函数
 static __always_inline void inc_drop_count()
 {
@@ -43,6 +57,56 @@ static __always_inline void inc_drop_count()
     __u64 *cnt = bpf_map_lookup_elem(&drop_stats, &key);
     if (cnt) {
         (*cnt)++;
+    }
+}
+
+// ── 水位背压决策 ──────────────────────────────────────────────────
+// 根据当前水位 + 规则严重等级，返回 BACKPRESSURE_REALTIME / BATCH / DROP
+//
+// 策略矩阵：
+//
+//               | NORMAL | WARNING | HIGH   | OVERLOAD
+//  -------------+--------+---------+--------+---------
+//  LOW(0)       | 实时   | 批量    | 丢弃   | 丢弃
+//  MEDIUM(1)    | 实时   | 实时    | 批量   | 丢弃
+//  HIGH(2)      | 实时   | 实时    | 实时   | 批量
+//  CRITICAL(3)  | 实时   | 实时    | 实时   | 实时
+//
+static __always_inline int check_backpressure(unsigned char severity)
+{
+    __u32 key = 0;
+    __u32 *level = bpf_map_lookup_elem(&watermark_level, &key);
+    if (!level)
+        return BACKPRESSURE_REALTIME;  // map 未初始化时默认实时提交
+
+    switch (*level) {
+    case WATERMARK_NORMAL:
+        return BACKPRESSURE_REALTIME;
+
+    case WATERMARK_WARNING:
+        // Low → 批量，其余实时
+        if (severity == SEVERITY_LOW)
+            return BACKPRESSURE_BATCH;
+        return BACKPRESSURE_REALTIME;
+
+    case WATERMARK_HIGH:
+        // Low → 丢弃，Medium → 批量，High/Critical → 实时
+        if (severity == SEVERITY_LOW)
+            return BACKPRESSURE_DROP;
+        if (severity == SEVERITY_MEDIUM)
+            return BACKPRESSURE_BATCH;
+        return BACKPRESSURE_REALTIME;
+
+    case WATERMARK_OVERLOAD:
+        // Low/Medium → 丢弃，High → 批量，Critical → 实时
+        if (severity == SEVERITY_LOW || severity == SEVERITY_MEDIUM)
+            return BACKPRESSURE_DROP;
+        if (severity == SEVERITY_HIGH)
+            return BACKPRESSURE_BATCH;
+        return BACKPRESSURE_REALTIME;
+
+    default:
+        return BACKPRESSURE_REALTIME;
     }
 }
 
@@ -88,6 +152,13 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
         return 0;
     }
 
+    // ── 水位背压决策 ──────────────────────────────────────────
+    int bp_decision = check_backpressure(rule->severity);
+    if (bp_decision == BACKPRESSURE_DROP) {
+        inc_drop_count();
+        return 0;
+    }
+
     // 匹配成功
     struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) {
@@ -105,7 +176,8 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
     dentry = BPF_CORE_READ(file, f_path.dentry);
     bpf_probe_read_str(e->path, sizeof(e->path), BPF_CORE_READ(dentry, d_name.name));
 
-    bpf_ringbuf_submit(e, 0);
+    // BATCH → BPF_RB_NO_WAKEUP（禁唤醒，批量提交）；REALTIME → 0（实时提交）
+    bpf_ringbuf_submit(e, bp_decision == BACKPRESSURE_BATCH ? BPF_RB_NO_WAKEUP : 0);
 
     // 使用
     if (rule->action == ACTION_BLOCK) {
@@ -133,6 +205,13 @@ int BPF_PROG(file_chmod_hook, const struct path *path, umode_t mode) {
     if (!rule)
         return 0;
 
+    // ── 水位背压决策 ──────────────────────────────────────────
+    int bp_decision = check_backpressure(rule->severity);
+    if (bp_decision == BACKPRESSURE_DROP) {
+        inc_drop_count();
+        return 0;
+    }
+
     // 发送 chmod 事件
     struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e)
@@ -152,7 +231,7 @@ int BPF_PROG(file_chmod_hook, const struct path *path, umode_t mode) {
     if (name_ptr)
         bpf_probe_read_str(e->path, sizeof(e->path), name_ptr);
 
-    bpf_ringbuf_submit(e, 0);
+    bpf_ringbuf_submit(e, bp_decision == BACKPRESSURE_BATCH ? BPF_RB_NO_WAKEUP : 0);
     bpf_printk("CHMOD detected for inode %lu, new mode: %u\n", ino, mode);
 
     return 0;
@@ -174,6 +253,13 @@ int BPF_PROG(file_chown_hook, const struct path *path, unsigned int uid, unsigne
     if (!rule)
         return 0;
 
+    // ── 水位背压决策 ──────────────────────────────────────────
+    int bp_decision = check_backpressure(rule->severity);
+    if (bp_decision == BACKPRESSURE_DROP) {
+        inc_drop_count();
+        return 0;
+    }
+
     // 发送 chown 事件
     struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e)
@@ -193,7 +279,7 @@ int BPF_PROG(file_chown_hook, const struct path *path, unsigned int uid, unsigne
     if (name_ptr)
         bpf_probe_read_str(e->path, sizeof(e->path), name_ptr);
 
-    bpf_ringbuf_submit(e, 0);
+    bpf_ringbuf_submit(e, bp_decision == BACKPRESSURE_BATCH ? BPF_RB_NO_WAKEUP : 0);
     bpf_printk("CHOWN detected for inode %lu, new uid: %u, gid: %u\n", ino, uid, gid);
 
     return 0;
@@ -214,6 +300,13 @@ int BPF_PROG(file_unlink_hook, const struct path *path, struct dentry *dentry) {
     if (!rule)
         return 0;
 
+    // ── 水位背压决策 ──────────────────────────────────────────
+    int bp_decision = check_backpressure(rule->severity);
+    if (bp_decision == BACKPRESSURE_DROP) {
+        inc_drop_count();
+        return 0;
+    }
+
     // 发送 unlink 事件
     struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e)
@@ -233,7 +326,7 @@ int BPF_PROG(file_unlink_hook, const struct path *path, struct dentry *dentry) {
     if (name_ptr)
         bpf_probe_read_str(e->path, sizeof(e->path), name_ptr);
 
-    bpf_ringbuf_submit(e, 0);
+    bpf_ringbuf_submit(e, bp_decision == BACKPRESSURE_BATCH ? BPF_RB_NO_WAKEUP : 0);
     bpf_printk("UNLINK detected for inode %lu\n", ino);
 
     return 0;

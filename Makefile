@@ -43,7 +43,7 @@ MAIN_SRCS = src/main.cpp \
             src/monitor/monitor_baseline.cpp \
             src/report/report_generator.cpp \
             src/storage/baseline_db.cpp
-MONITOR_SRC = src/monitor/monitor.cpp
+MONITOR_SRC = src/monitor/monitor.cpp src/monitor/watermark_backpressure.cpp
 STATS_SRC = src/stats/stats.cpp
 
 OBJS = $(MAIN_SRCS:.cpp=.o) $(MONITOR_SRC:.cpp=.o) $(STATS_SRC:.cpp=.o)
