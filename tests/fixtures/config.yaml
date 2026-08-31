@@ -1,0 +1,9 @@
+alert:
+  dingtalk:
+    webhook: "https://oapi.dingtalk.com/robot/send?access_token=62beab85c2cb1d9048a9aad8c2f8a974aecb1cbd79c4bfe244fb583d421f93c4"
+    secret: "SECeb007442a09cd80a4eaf0c9e5d172b275ce3704de0b58004e10536e935493021"  # 可选，加签密钥
+  throttle: 300  # 同一规则5分钟内只告警一次（秒）
+
+db:
+  retention_days: 30
+  retention_max_records: 10000

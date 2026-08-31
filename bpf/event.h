@@ -13,6 +13,12 @@
 #define EVENT_CHMOD 3
 #define EVENT_CHOWN 4
 #define EVENT_UNLINK 5
+#define EVENT_RENAME 6
+#define EVENT_MMAP 7
+
+// events_mask 位编码宏：将事件类型转换为掩码位
+// EVENT_READ(1)/EVENT_WRITE(2) 直接作为掩码位；其余用 (1 << value)
+#define EVENT_MASK_BIT(e) ((e) <= 2 ? (e) : (1 << (e)))
 
 // 严重等级（数值越高越严重，与用户态 SeverityLevel 枚举对应）
 #define SEVERITY_LOW      0
@@ -31,7 +37,7 @@
 // eBPF hook 通过 inode 查到该结构后，据此决定是否拦截/告警
 struct monitor_rule {
     unsigned char action;       // 触发动作：ACTION_LOG(0) / ACTION_ALERT(1) / ACTION_BLOCK(3) 等
-    unsigned char events_mask;  // 事件掩码（位运算）：EVENT_READ(1) | EVENT_WRITE(2) 等
+    unsigned char events_mask;  // 事件掩码：EVENT_MASK_BIT(EVENT_READ) | EVENT_MASK_BIT(EVENT_WRITE) | EVENT_MASK_BIT(EVENT_UNLINK) 等
     unsigned char severity;     // 严重等级：SEVERITY_LOW(0) ~ SEVERITY_CRITICAL(3)
 };
 

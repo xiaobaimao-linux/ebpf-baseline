@@ -41,5 +41,6 @@ struct Rule {
     Action monitor_action = Action::UNKNOWN;
     bool monitor_read = false;
     bool monitor_write = false;
+    bool monitor_delete = false;
 };
 

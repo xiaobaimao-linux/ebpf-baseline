@@ -255,6 +255,9 @@ Config parseYamlFile(const string &filename) {
                             if (evt == "write") {
                                 rule.monitor_write = true;
                             }
+                            if (evt == "delete") {
+                                rule.monitor_delete = true;
+                            }
                         }
                     }
                 }

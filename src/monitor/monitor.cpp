@@ -449,6 +449,9 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
         if (rule.monitor_write) {
             value.events_mask |= EVENT_WRITE;
         }
+        if (rule.monitor_delete) {
+            value.events_mask |= EVENT_MASK_BIT(EVENT_UNLINK);
+        }
         value.severity = rule.severity;
 
         bpf_map_update_elem(fd_actions, &key, &value, BPF_ANY);

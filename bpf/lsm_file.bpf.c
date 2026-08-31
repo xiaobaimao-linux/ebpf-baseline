@@ -188,43 +188,41 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
     return 0;
 }
 
-SEC("lsm/path_chmod")
-int BPF_PROG(file_chmod_hook, const struct path *path, umode_t mode) {
-    char comm[16] = {};
-    unsigned long ino;
-    char fname[256] = {};
-
-    struct dentry *dentry = BPF_CORE_READ(path, dentry);
-    if (!dentry)
-        return 0;
-
-    ino = BPF_CORE_READ(dentry, d_inode, i_ino);
-
-    // 查规则（存在即监控）
+// ── chmod/chown/unlink 公共处理 ─────────────────────────────────
+// 查规则 → 背压决策 → 填充并提交事件，消除各 hook 重复代码
+static __always_inline int emit_attr_event(unsigned long ino,
+                                           struct dentry *dentry,
+                                           unsigned char event_type,
+                                           unsigned int new_mode,
+                                           unsigned int new_uid,
+                                           unsigned int new_gid)
+{
     struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
     if (!rule)
         return 0;
 
-    // ── 水位背压决策 ──────────────────────────────────────────
+    // 检查 events_mask 是否包含该事件类型
+    if (!(rule->events_mask & EVENT_MASK_BIT(event_type)))
+        return 0;
+
     int bp_decision = check_backpressure(rule->severity);
     if (bp_decision == BACKPRESSURE_DROP) {
         inc_drop_count();
         return 0;
     }
 
-    // 发送 chmod 事件
     struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e)
         return 0;
 
     e->pid = bpf_get_current_pid_tgid() >> 32;
-    __builtin_memcpy(e->comm, comm, sizeof(comm));
+    __builtin_memset(e->comm, 0, sizeof(e->comm));
     e->ino = ino;
     e->action = rule->action;
-    e->event_type = EVENT_CHMOD;
-    e->new_mode = mode;
-    e->new_uid = 0;
-    e->new_gid = 0;
+    e->event_type = event_type;
+    e->new_mode = new_mode;
+    e->new_uid = new_uid;
+    e->new_gid = new_gid;
     e->mask = 0;
 
     const unsigned char *name_ptr = BPF_CORE_READ(dentry, d_name.name);
@@ -232,102 +230,112 @@ int BPF_PROG(file_chmod_hook, const struct path *path, umode_t mode) {
         bpf_probe_read_str(e->path, sizeof(e->path), name_ptr);
 
     bpf_ringbuf_submit(e, bp_decision == BACKPRESSURE_BATCH ? BPF_RB_NO_WAKEUP : 0);
-    bpf_printk("CHMOD detected for inode %lu, new mode: %u\n", ino, mode);
 
+    // ACTION_BLOCK → 阻止操作
+    if (rule->action == ACTION_BLOCK)
+        return -EPERM;
     return 0;
+}
+
+SEC("lsm/file_chmod")
+int BPF_PROG(file_chmod_file_hook, struct file *file, umode_t mode) {
+    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
+    if (!dentry)
+        return 0;
+    unsigned long ino = BPF_CORE_READ(file, f_inode, i_ino);
+    bpf_printk("FILE_CHMOD detected for inode %lu, new mode: %u\n", ino, mode);
+    return emit_attr_event(ino, dentry, EVENT_CHMOD, mode, 0, 0);
+}
+
+SEC("lsm/path_chmod")
+int BPF_PROG(file_chmod_hook, const struct path *path, umode_t mode) {
+    struct dentry *dentry = BPF_CORE_READ(path, dentry);
+    if (!dentry)
+        return 0;
+    unsigned long ino = BPF_CORE_READ(dentry, d_inode, i_ino);
+    bpf_printk("CHMOD detected for inode %lu, new mode: %u\n", ino, mode);
+    return emit_attr_event(ino, dentry, EVENT_CHMOD, mode, 0, 0);
+}
+
+SEC("lsm/file_chown")
+int BPF_PROG(file_chown_file_hook, struct file *file, unsigned int uid, unsigned int gid) {
+    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
+    if (!dentry)
+        return 0;
+    unsigned long ino = BPF_CORE_READ(file, f_inode, i_ino);
+    bpf_printk("FILE_CHOWN detected for inode %lu, new uid: %u, gid: %u\n", ino, uid, gid);
+    return emit_attr_event(ino, dentry, EVENT_CHOWN, 0, uid, gid);
 }
 
 SEC("lsm/path_chown")
 int BPF_PROG(file_chown_hook, const struct path *path, unsigned int uid, unsigned int gid) {
-    char comm[16] = {};
-    unsigned long ino;
-
     struct dentry *dentry = BPF_CORE_READ(path, dentry);
     if (!dentry)
         return 0;
-
-    ino = BPF_CORE_READ(dentry, d_inode, i_ino);
-
-    // 查规则（存在即监控）
-    struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
-    if (!rule)
-        return 0;
-
-    // ── 水位背压决策 ──────────────────────────────────────────
-    int bp_decision = check_backpressure(rule->severity);
-    if (bp_decision == BACKPRESSURE_DROP) {
-        inc_drop_count();
-        return 0;
-    }
-
-    // 发送 chown 事件
-    struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
-        return 0;
-
-    e->pid = bpf_get_current_pid_tgid() >> 32;
-    __builtin_memcpy(e->comm, comm, sizeof(comm));
-    e->ino = ino;
-    e->action = rule->action;
-    e->event_type = EVENT_CHOWN;
-    e->new_mode = 0;
-    e->new_uid = uid;
-    e->new_gid = gid;
-    e->mask = 0;
-
-    const unsigned char *name_ptr = BPF_CORE_READ(dentry, d_name.name);
-    if (name_ptr)
-        bpf_probe_read_str(e->path, sizeof(e->path), name_ptr);
-
-    bpf_ringbuf_submit(e, bp_decision == BACKPRESSURE_BATCH ? BPF_RB_NO_WAKEUP : 0);
+    unsigned long ino = BPF_CORE_READ(dentry, d_inode, i_ino);
     bpf_printk("CHOWN detected for inode %lu, new uid: %u, gid: %u\n", ino, uid, gid);
-
-    return 0;
+    return emit_attr_event(ino, dentry, EVENT_CHOWN, 0, uid, gid);
 }
 
-SEC("lsm/path_unlink")
-int BPF_PROG(file_unlink_hook, const struct path *path, struct dentry *dentry) {
-    char comm[16] = {};
-    unsigned long ino;
+SEC("lsm/inode_unlink")
+int BPF_PROG(file_unlink_hook, struct inode *dir, struct dentry *dentry) {
+    if (!dentry)
+        return 0;
+    unsigned long ino = BPF_CORE_READ(dentry, d_inode, i_ino);
+    bpf_printk("UNLINK detected for inode %lu\n", ino);
+    return emit_attr_event(ino, dentry, EVENT_UNLINK, 0, 0, 0);
+}
 
+// ── rename：仅当 write 事件被监控时，复用 emit_attr_event 处理 ──
+static __always_inline int check_rename_target(struct dentry *dentry)
+{
+    if (!dentry)
+        return 0;
+    struct inode *inode = BPF_CORE_READ(dentry, d_inode);
+    if (!inode)
+        return 0;
+
+    unsigned long ino = BPF_CORE_READ(inode, i_ino);
+    struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
+    if (!rule || !(rule->events_mask & EVENT_WRITE))
+        return 0;
+
+    bpf_printk("RENAME detected for inode %lu (write monitored)\n", ino);
+    return emit_attr_event(ino, dentry, EVENT_RENAME, 0, 0, 0);
+}
+
+// inode_rename: 同时检查源文件（被移走）和目标文件（被覆盖）
+SEC("lsm/inode_rename")
+int BPF_PROG(inode_rename_hook, struct inode *old_dir, struct dentry *old_dentry,
+             struct inode *new_dir, struct dentry *new_dentry, unsigned int flags) {
+    int ret = check_rename_target(old_dentry);
+    if (ret != 0)
+        return ret;
+    return check_rename_target(new_dentry);
+}
+
+// file_mmap: 根据 mmap 保护级别匹配监控事件，复用 emit_attr_event 处理
+// PROT_READ=0x1, PROT_WRITE=0x2
+SEC("lsm/file_mmap")
+int BPF_PROG(file_mmap_hook, struct file *file, unsigned long reqprot, unsigned long prot, unsigned long flags) {
+    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
     if (!dentry)
         return 0;
 
-    ino = BPF_CORE_READ(dentry, d_inode, i_ino);
-
-    // 查规则（存在即监控）
+    unsigned long ino = BPF_CORE_READ(file, f_inode, i_ino);
     struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
     if (!rule)
         return 0;
 
-    // ── 水位背压决策 ──────────────────────────────────────────
-    int bp_decision = check_backpressure(rule->severity);
-    if (bp_decision == BACKPRESSURE_DROP) {
-        inc_drop_count();
-        return 0;
-    }
-
-    // 发送 unlink 事件
-    struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
+    // 根据 mmap 保护级别匹配监控事件
+    int matched = 0;
+    if ((reqprot & 0x2) && (rule->events_mask & EVENT_WRITE))  // PROT_WRITE
+        matched = 1;
+    if ((reqprot & 0x1) && (rule->events_mask & EVENT_READ))   // PROT_READ
+        matched = 1;
+    if (!matched)
         return 0;
 
-    e->pid = bpf_get_current_pid_tgid() >> 32;
-    __builtin_memcpy(e->comm, comm, sizeof(comm));
-    e->ino = ino;
-    e->action = rule->action;
-    e->event_type = EVENT_UNLINK;
-    e->new_mode = 0;
-    e->new_uid = 0;
-    e->new_gid = 0;
-    e->mask = 0;
-
-    const unsigned char *name_ptr = BPF_CORE_READ(dentry, d_name.name);
-    if (name_ptr)
-        bpf_probe_read_str(e->path, sizeof(e->path), name_ptr);
-
-    bpf_ringbuf_submit(e, bp_decision == BACKPRESSURE_BATCH ? BPF_RB_NO_WAKEUP : 0);
-    bpf_printk("UNLINK detected for inode %lu\n", ino);
-
-    return 0;
+    bpf_printk("MMAP detected for inode %lu, reqprot: %lu\n", ino, reqprot);
+    return emit_attr_event(ino, dentry, EVENT_MMAP, (unsigned int)reqprot, 0, 0);
 }
