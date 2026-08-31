@@ -296,7 +296,7 @@ monitor report 截图：
 3. 企业专属基线规则包（CIS/等保/工控专用）
 4. 多服务器集中管控平台定制开发
 ### 联系方式
-邮箱：xiaobaimao-linux@proton.me
+邮箱：kabc005009@163.com
 知乎主页：https://zhihu.com/people/q1w2e3r4t5y6-86
 
 ------
