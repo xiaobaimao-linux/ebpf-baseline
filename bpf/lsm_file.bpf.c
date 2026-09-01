@@ -239,16 +239,6 @@ static __always_inline int emit_attr_event(unsigned long ino,
     return 0;
 }
 
-SEC("lsm/file_chmod")
-int BPF_PROG(file_chmod_file_hook, struct file *file, umode_t mode) {
-    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
-    if (!dentry)
-        return 0;
-    unsigned long ino = BPF_CORE_READ(file, f_inode, i_ino);
-    bpf_printk("FILE_CHMOD detected for inode %lu, new mode: %u\n", ino, mode);
-    return emit_attr_event(ino, dentry, EVENT_CHMOD, mode, 0, 0);
-}
-
 SEC("lsm/path_chmod")
 int BPF_PROG(file_chmod_hook, const struct path *path, umode_t mode) {
     struct dentry *dentry = BPF_CORE_READ(path, dentry);
@@ -257,16 +247,6 @@ int BPF_PROG(file_chmod_hook, const struct path *path, umode_t mode) {
     unsigned long ino = BPF_CORE_READ(dentry, d_inode, i_ino);
     bpf_printk("CHMOD detected for inode %lu, new mode: %u\n", ino, mode);
     return emit_attr_event(ino, dentry, EVENT_CHMOD, mode, 0, 0);
-}
-
-SEC("lsm/file_chown")
-int BPF_PROG(file_chown_file_hook, struct file *file, unsigned int uid, unsigned int gid) {
-    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
-    if (!dentry)
-        return 0;
-    unsigned long ino = BPF_CORE_READ(file, f_inode, i_ino);
-    bpf_printk("FILE_CHOWN detected for inode %lu, new uid: %u, gid: %u\n", ino, uid, gid);
-    return emit_attr_event(ino, dentry, EVENT_CHOWN, 0, uid, gid);
 }
 
 SEC("lsm/path_chown")
@@ -318,7 +298,7 @@ int BPF_PROG(inode_rename_hook, struct inode *old_dir, struct dentry *old_dentry
 
 // file_mmap: 根据 mmap 保护级别匹配监控事件，复用 emit_attr_event 处理
 // PROT_READ=0x1, PROT_WRITE=0x2
-SEC("lsm/file_mmap")
+SEC("lsm/mmap_file")
 int BPF_PROG(file_mmap_hook, struct file *file, unsigned long reqprot, unsigned long prot, unsigned long flags) {
     struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
     if (!dentry)
