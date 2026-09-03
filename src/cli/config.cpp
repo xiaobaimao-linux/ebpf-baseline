@@ -163,6 +163,7 @@ Config parseYamlFile(const string &filename) {
 
         const YAML::Node &rulesNode = root["rules"];
         for (const auto &item : rulesNode) {
+            try {
             Rule rule;
 
             rule.id = item["id"] ? item["id"].as<string>() : "";
@@ -277,6 +278,10 @@ Config parseYamlFile(const string &filename) {
                           rule.check_on_failure.empty() ? "(无)" : rule.check_on_failure,
                           rule.monitor_path.empty() ? "(无)" : rule.monitor_path,
                           rule.monitor_events.empty() ? "(无)" : "set");
+            } catch (const YAML::Exception &e) {
+                string rule_id = item["id"] ? item["id"].as<string>() : "(unknown)";
+                spdlog::warn("规则 {} 解析失败，已跳过: {}", rule_id, e.what());
+            }
         }
 
         config.rules = rules;
