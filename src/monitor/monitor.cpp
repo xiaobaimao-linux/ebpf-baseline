@@ -18,6 +18,7 @@
 #include <spdlog/spdlog.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
 #include <unordered_map>
 #include <vector>
 #include <sstream>
@@ -396,12 +397,36 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    skel = lsm_file_bpf__open_and_load();
+    // 分步 open → autoload 控制 → load → attach，兼容低版本内核
+    skel = lsm_file_bpf__open();
     if (!skel) {
-        spdlog::error("[bpf_program_error] Failed to open and load BPF skeleton");
+        spdlog::error("[bpf_program_error] Failed to open BPF skeleton");
         return 1;
     }
-    spdlog::info("[bpf_program_loaded] BPF skeleton opened and loaded successfully");
+    spdlog::info("[bpf_program_loaded] BPF skeleton opened successfully");
+
+    // 兼容内核 5.8：mmap_file LSM hook 在 5.9 才引入，
+    // 仅在低版本内核上禁用 autoload，5.9+ 保留 mmap 监控能力
+    if (skel->progs.file_mmap_hook) {
+        struct utsname uts;
+        unsigned int k_major = 0, k_minor = 0;
+        if (uname(&uts) == 0) {
+            sscanf(uts.release, "%u.%u", &k_major, &k_minor);
+        }
+        if (k_major < 5 || (k_major == 5 && k_minor < 9)) {
+            bpf_program__set_autoload(skel->progs.file_mmap_hook, false);
+            spdlog::info("[bpf_compat] mmap_file hook disabled (kernel {}.{}, requires 5.9+)",
+                         k_major, k_minor);
+        }
+    }
+
+    err = lsm_file_bpf__load(skel);
+    if (err) {
+        spdlog::error("[bpf_program_error] Failed to load BPF skeleton: {}", err);
+        lsm_file_bpf__destroy(skel);
+        return 1;
+    }
+    spdlog::info("[bpf_program_loaded] BPF skeleton loaded successfully");
 
     err = lsm_file_bpf__attach(skel);
     if (err) {

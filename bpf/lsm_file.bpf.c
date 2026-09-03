@@ -283,9 +283,11 @@ static __always_inline int check_rename_target(struct dentry *dentry)
 }
 
 // inode_rename: 同时检查源文件（被移走）和目标文件（被覆盖）
+// 兼容内核 5.8+：security_inode_rename() 在 5.8 中只有 4 个参数，
+// flags 参数在 5.12 才引入，此处不声明以兼容最低版本
 SEC("lsm/inode_rename")
 int BPF_PROG(inode_rename_hook, struct inode *old_dir, struct dentry *old_dentry,
-             struct inode *new_dir, struct dentry *new_dentry, unsigned int flags) {
+             struct inode *new_dir, struct dentry *new_dentry) {
     int ret = check_rename_target(old_dentry);
     if (ret != 0)
         return ret;
@@ -294,8 +296,10 @@ int BPF_PROG(inode_rename_hook, struct inode *old_dir, struct dentry *old_dentry
 
 // file_mmap: 根据 mmap 保护级别匹配监控事件，复用 emit_attr_event 处理
 // PROT_READ=0x1, PROT_WRITE=0x2
+// 兼容内核 5.8+：mmap_file LSM hook 在 5.9 才引入，
+// __weak 使 libbpf 在 5.8 内核上跳过此程序而不报错
 SEC("lsm/mmap_file")
-int BPF_PROG(file_mmap_hook, struct file *file, unsigned long reqprot, unsigned long prot, unsigned long flags) {
+int __weak BPF_PROG(file_mmap_hook, struct file *file, unsigned long reqprot, unsigned long prot, unsigned long flags) {
     struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
     if (!dentry)
         return 0;
