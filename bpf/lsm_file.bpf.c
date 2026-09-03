@@ -9,8 +9,6 @@ char LICENSE[] SEC("license") = "GPL";
 
 #define EPERM 1
 
-static long (*bpf_strlen)(const char *str) = (void *)115;
-
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 256 * 1024);
@@ -110,8 +108,6 @@ static __always_inline int check_backpressure(unsigned char severity)
     }
 }
 
-extern int bpf_path_d_path(struct path *path, char *buf, int buf_len) __ksym;
-
 SEC("lsm/file_permission")
 int BPF_PROG(file_permission, struct file *file, int mask) {
 
@@ -129,8 +125,8 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
     if (!name_ptr)
         return 0;
 
-    // 2) 拷到栈缓冲区
-    bpf_probe_read_kernel_str(fname, sizeof(fname), name_ptr);
+    // 2) CO-RE 感知字符串读取，生成 BTF 重定位信息
+    bpf_core_read_str(fname, sizeof(fname), name_ptr);
 
     if (name_len == 28) {
         bpf_printk("file name: %s\n", fname);
@@ -173,8 +169,8 @@ int BPF_PROG(file_permission, struct file *file, int mask) {
     e->action = rule->action;
     e->mask = mask;
 
-    dentry = BPF_CORE_READ(file, f_path.dentry);
-    bpf_probe_read_str(e->path, sizeof(e->path), BPF_CORE_READ(dentry, d_name.name));
+    // CO-RE: 先通过 BPF_CORE_READ 获取指针（生成重定位），再用 bpf_core_read_str 读取字符串
+    bpf_core_read_str(e->path, sizeof(e->path), name_ptr);
 
     // BATCH → BPF_RB_NO_WAKEUP（禁唤醒，批量提交）；REALTIME → 0（实时提交）
     bpf_ringbuf_submit(e, bp_decision == BACKPRESSURE_BATCH ? BPF_RB_NO_WAKEUP : 0);
@@ -229,7 +225,7 @@ static __always_inline int emit_attr_event(unsigned long ino,
 
     const unsigned char *name_ptr = BPF_CORE_READ(dentry, d_name.name);
     if (name_ptr)
-        bpf_probe_read_str(e->path, sizeof(e->path), name_ptr);
+        bpf_core_read_str(e->path, sizeof(e->path), name_ptr);
 
     bpf_ringbuf_submit(e, bp_decision == BACKPRESSURE_BATCH ? BPF_RB_NO_WAKEUP : 0);
 
