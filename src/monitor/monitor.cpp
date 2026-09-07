@@ -24,9 +24,28 @@
 #include <sstream>
 
 // 包含生成的skeleton头文件
-#include "../bpf/lsm_file.skel.h"
+#include "../bpf/lsm_file.skel.h"        // 5.8+ ring buffer
+#include "../bpf/lsm_file_perf.skel.h"   // 5.7 perf buffer
+#include "../bpf/lsm_kprobe.skel.h"      // 5.4 kprobe
 
 static volatile bool running = true;
+
+// ── 内核版本检测 ────────────────────────────────────────────────
+struct KernelVersion { unsigned int major, minor; };
+
+static KernelVersion get_kernel_version() {
+    struct utsname uts;
+    KernelVersion kv = {0, 0};
+    if (uname(&uts) == 0) {
+        sscanf(uts.release, "%u.%u", &kv.major, &kv.minor);
+    }
+    return kv;
+}
+
+static bool kernel_at_least(unsigned int major, unsigned int minor) {
+    auto kv = get_kernel_version();
+    return kv.major > major || (kv.major == major && kv.minor >= minor);
+}
 
 void signal_handler(int sig) {
     running = false;
@@ -277,6 +296,7 @@ struct MonitorContext {
 static void process_event_core(struct event* e, MonitorContext* mctx);
 
 // ── 事件回调：将事件拷贝到批量缓冲区，由 FlushEventBatch 统一处理 ──
+// ring buffer 回调签名
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)data_sz;
 
@@ -290,6 +310,22 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     }
 
     return 0;
+}
+
+// perf event buffer 回调签名（5.7 / 5.4 路径复用）
+static void perf_event_cb(void *ctx, int cpu, void *data, __u32 size) {
+    (void)cpu;
+    auto* mctx = static_cast<MonitorContext*>(ctx);
+    auto* e    = static_cast<struct event *>(data);
+
+    if (size < sizeof(struct event))
+        return;
+
+    if (mctx->event_batch.size() < kMaxBatchSize) {
+        mctx->event_batch.push_back(*e);
+    } else {
+        mctx->dropped_count++;
+    }
 }
 
 // ── 核心事件处理逻辑 ────────────────────────────────────────────────
@@ -389,75 +425,14 @@ static void FlushEventBatch(MonitorContext* mctx) {
     mctx->event_batch.clear();
 }
 
-int do_monitor(const Config& config, AlertManager &alert_mgr,
-               const std::string& baseline_db_path, bool skip_boot_check) {
-    struct lsm_file_bpf *skel;
-    int err;
-
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-
-    // 分步 open → autoload 控制 → load → attach，兼容低版本内核
-    skel = lsm_file_bpf__open();
-    if (!skel) {
-        spdlog::error("[bpf_program_error] Failed to open BPF skeleton");
-        return 1;
-    }
-    spdlog::info("[bpf_program_loaded] BPF skeleton opened successfully");
-
-    // 兼容内核 5.8：mmap_file LSM hook 在 5.9 才引入，
-    // 仅在低版本内核上禁用 autoload，5.9+ 保留 mmap 监控能力
-    if (skel->progs.file_mmap_hook) {
-        struct utsname uts;
-        unsigned int k_major = 0, k_minor = 0;
-        if (uname(&uts) == 0) {
-            sscanf(uts.release, "%u.%u", &k_major, &k_minor);
-        }
-        if (k_major < 5 || (k_major == 5 && k_minor < 9)) {
-            bpf_program__set_autoload(skel->progs.file_mmap_hook, false);
-            spdlog::info("[bpf_compat] mmap_file hook disabled (kernel {}.{}, requires 5.9+)",
-                         k_major, k_minor);
-        }
-    }
-
-    err = lsm_file_bpf__load(skel);
-    if (err) {
-        spdlog::error("[bpf_program_error] Failed to load BPF skeleton: {}", err);
-        lsm_file_bpf__destroy(skel);
-        return 1;
-    }
-    spdlog::info("[bpf_program_loaded] BPF skeleton loaded successfully");
-
-    err = lsm_file_bpf__attach(skel);
-    if (err) {
-        spdlog::error("[bpf_program_error] Failed to attach BPF program: {}", err);
-        lsm_file_bpf__destroy(skel);
-        return 1;
-    }
-    spdlog::info("[bpf_program_loaded] BPF LSM program attached successfully, monitoring {} rules", config.rules.size());
-
-    // ── Pin drop_stats + watermark_level map 到 bpffs ─────────────
-    {
-        // 确保 bpffs 目录存在
-        (void)mkdir("/sys/fs/bpf/baseline-guard", 0755);
-        int pin_err = bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
-        if (pin_err != 0) {
-            spdlog::warn("[bpf_map_pin] failed to pin drop_stats map: {}", strerror(-pin_err));
-        } else {
-            spdlog::info("[bpf_map_pin] drop_stats map pinned to /sys/fs/bpf/baseline-guard/drop_stats");
-        }
-        int pin_wm = bpf_map__pin(skel->maps.watermark_level, "/sys/fs/bpf/baseline-guard/watermark_level");
-        if (pin_wm != 0) {
-            spdlog::warn("[bpf_map_pin] failed to pin watermark_level map: {}", strerror(-pin_wm));
-        } else {
-            spdlog::info("[bpf_map_pin] watermark_level map pinned");
-        }
-    }
-
-    int fd_actions   = bpf_map__fd(skel->maps.monitor_actions);
-    int fd_watermark = bpf_map__fd(skel->maps.watermark_level);
-
-    // 只写入 monitor_actions：同时传递动作、事件掩码和严重等级
+// ── 公共初始化：写入规则到 eBPF map + 基线加载 ─────────────────
+static int common_monitor_init(int fd_actions,
+                               const Config& config,
+                               const std::string& baseline_db_path,
+                               bool skip_boot_check,
+                               AlertManager& alert_mgr,
+                               BaselineDB*& baseline_db_out) {
+    // 写入 monitor_actions：同时传递动作、事件掩码和严重等级
     for (const auto &rule : config.rules) {
         if (!rule.has_monitor)
             continue;
@@ -468,32 +443,27 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
         struct monitor_rule value{};
         value.action = (rule.monitor_action == Action::BLOCK) ? ACTION_BLOCK : ACTION_ALERT;
         value.events_mask = 0;
-        if (rule.monitor_read) {
+        if (rule.monitor_read)
             value.events_mask |= EVENT_READ;
-        }
-        if (rule.monitor_write) {
+        if (rule.monitor_write)
             value.events_mask |= EVENT_WRITE;
-        }
-        if (rule.monitor_delete) {
+        if (rule.monitor_delete)
             value.events_mask |= EVENT_MASK_BIT(EVENT_UNLINK);
-        }
         value.severity = rule.severity;
 
         bpf_map_update_elem(fd_actions, &key, &value, BPF_ANY);
     }
 
-    // 初始化 inode 映射
     init_inode_maps(config);
 
-    // ── 基线实时监控初始化（仅当 --db 模式下）────────────────────
-    BaselineDB* baseline_db = nullptr;
+    // ── 基线实时监控初始化（仅当 --db 模式下）────────────────
+    baseline_db_out = nullptr;
     if (!baseline_db_path.empty()) {
         try {
-            baseline_db = new BaselineDB(baseline_db_path);  // WAL 已自动开启
+            baseline_db_out = new BaselineDB(baseline_db_path);
 
-            // 加载全部基线条目，构建 inode -> CheckEntry 映射
             g_inode_to_baseline.clear();
-            auto entries = baseline_db->GetAllBaselineEntries();
+            auto entries = baseline_db_out->GetAllBaselineEntries();
             for (auto& e : entries) {
                 struct stat st;
                 if (lstat(e.file_path.c_str(), &st) == 0 && st.st_ino != 0) {
@@ -503,14 +473,13 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
             spdlog::info("[baseline_monitor] loaded {} baseline entries from {}",
                          g_inode_to_baseline.size(), baseline_db_path);
 
-            // 注册基线 inode 到 eBPF map（仅当该 inode 尚未被 YAML 规则注册时）
             int baseline_registered = 0;
             for (const auto& [ino, entry] : g_inode_to_baseline) {
                 if (g_inode_to_rule.find(ino) == g_inode_to_rule.end()) {
                     struct monitor_rule value{};
                     value.action = ACTION_ALERT;
                     value.events_mask = EVENT_READ | EVENT_WRITE;
-                    value.severity = SEVERITY_HIGH;  // 基线事件默认 high
+                    value.severity = SEVERITY_HIGH;
                     if (bpf_map_update_elem(fd_actions, &ino, &value, BPF_NOEXIST) == 0) {
                         ++baseline_registered;
                     }
@@ -519,7 +488,6 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
             spdlog::info("[baseline_monitor] registered {} baseline inodes to eBPF map",
                          baseline_registered);
 
-            // ── 开机全基线自检（默认执行，--skip-boot-baseline-check 跳过）──
             if (!skip_boot_check) {
                 int boot_devs = 0;
                 for (const auto& [ino, entry] : g_inode_to_baseline) {
@@ -535,23 +503,105 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
             }
         } catch (const std::exception& ex) {
             spdlog::error("[baseline_monitor] failed to open baseline DB: {}", ex.what());
-            delete baseline_db;
-            baseline_db = nullptr;
+            delete baseline_db_out;
+            baseline_db_out = nullptr;
             g_inode_to_baseline.clear();
         }
     }
+    return 0;
+}
 
-    // ── 水位背压控制器 ────────────────────────────────────────────
+// ── 公共监控循环（perf buffer 路径，5.7 和 5.4 共用）──────────
+static int run_perf_buffer_loop(struct perf_buffer *pb,
+                                MonitorContext& mctx,
+                                AlertManager& alert_mgr) {
+    int count = 0;
+    const int RETENTION_INTERVAL = 36000;
+
+    while (running) {
+        count++;
+        int err = perf_buffer__poll(pb, 100);
+        if (err < 0 && err != -EINTR) {
+            spdlog::error("[bpf_program_error] Error polling perf buffer: {}", err);
+            break;
+        }
+
+        FlushEventBatch(&mctx);
+
+        if (count % RETENTION_INTERVAL == 0) {
+            int deleted = alert_mgr.RunRetention();
+            (void)deleted;
+        }
+    }
+
+    FlushEventBatch(&mctx);
+
+    if (mctx.dropped_count > 0) {
+        spdlog::warn("[batch] {} events dropped (batch overflow, max_batch_size={})",
+                     mctx.dropped_count, kMaxBatchSize);
+    }
+    return 0;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 路径 A：内核 5.8+ — BPF LSM + ring buffer
+// ══════════════════════════════════════════════════════════════════
+static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
+                              const std::string& baseline_db_path, bool skip_boot_check) {
+    struct lsm_file_bpf *skel;
+    int err;
+
+    skel = lsm_file_bpf__open();
+    if (!skel) {
+        spdlog::error("[bpf_program_error] Failed to open BPF skeleton");
+        return 1;
+    }
+
+    // 兼容内核 5.8：mmap_file LSM hook 在 5.9 才引入
+    if (skel->progs.file_mmap_hook && !kernel_at_least(5, 9)) {
+        bpf_program__set_autoload(skel->progs.file_mmap_hook, false);
+        auto kv = get_kernel_version();
+        spdlog::info("[bpf_compat] mmap_file hook disabled (kernel {}.{}, requires 5.9+)",
+                     kv.major, kv.minor);
+    }
+
+    err = lsm_file_bpf__load(skel);
+    if (err) {
+        spdlog::error("[bpf_program_error] Failed to load BPF skeleton: {}", err);
+        lsm_file_bpf__destroy(skel);
+        return 1;
+    }
+
+    err = lsm_file_bpf__attach(skel);
+    if (err) {
+        spdlog::error("[bpf_program_error] Failed to attach BPF program: {}", err);
+        lsm_file_bpf__destroy(skel);
+        return 1;
+    }
+    spdlog::info("[bpf_program_loaded] BPF LSM (ring buffer) attached, kernel 5.8+, {} rules",
+                 config.rules.size());
+
+    // Pin maps
+    (void)mkdir("/sys/fs/bpf/baseline-guard", 0755);
+    bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
+    bpf_map__pin(skel->maps.watermark_level, "/sys/fs/bpf/baseline-guard/watermark_level");
+
+    int fd_actions   = bpf_map__fd(skel->maps.monitor_actions);
+    int fd_watermark = bpf_map__fd(skel->maps.watermark_level);
+
+    BaselineDB* baseline_db = nullptr;
+    common_monitor_init(fd_actions, config, baseline_db_path, skip_boot_check, alert_mgr, baseline_db);
+
+    // 水位背压控制器
     WatermarkBackpressure backpressure;
     MonitorContext mctx;
     mctx.alert_mgr    = &alert_mgr;
     mctx.backpressure = &backpressure;
 
-    spdlog::info("Monitoring started. Press Ctrl+C to stop.");
+    spdlog::info("Monitoring started (ring buffer mode). Press Ctrl+C to stop.");
 
     struct ring_buffer *rb =
         ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, &mctx, nullptr);
-
     if (!rb) {
         spdlog::error("[bpf_program_error] Failed to create ring buffer");
         if (baseline_db) delete baseline_db;
@@ -559,16 +609,11 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
         return 1;
     }
 
-    // 初始化水位背压控制器
     backpressure.SetRingBuffer(rb);
     backpressure.SetNumCPUs(libbpf_num_possible_cpus());
-    spdlog::info("[watermark] backpressure controller initialized (cpus={})",
-                 libbpf_num_possible_cpus());
 
     int count = 0;
-    // 每1小时(约36000次poll)触发一次保留策略清理
-    const int RETENTION_INTERVAL = 36000;  // 100ms * 36000 = 3600s = 1h
-    // 每100次poll(~10s)更新一次水位并写入 eBPF map
+    const int RETENTION_INTERVAL = 36000;
     const int WATERMARK_INTERVAL = 100;
     while (running) {
         count++;
@@ -577,31 +622,21 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
             spdlog::error("[bpf_program_error] Error polling ring buffer: {}", err);
             break;
         }
-
-        // 批量处理本轮 poll 收集到的事件
         FlushEventBatch(&mctx);
 
-        // 定期更新水位并写入 eBPF watermark_level map
         if (count % WATERMARK_INTERVAL == 0) {
             backpressure.UpdateUtilization();
-
-            // 将当前水位写入 eBPF map，供内核态背压决策使用
             __u32 wm_key   = 0;
             __u32 wm_value = static_cast<__u32>(backpressure.GetWatermarkLevel());
             bpf_map_update_elem(fd_watermark, &wm_key, &wm_value, BPF_ANY);
         }
-
-        // 定期执行保留策略清理
         if (count % RETENTION_INTERVAL == 0) {
             int deleted = alert_mgr.RunRetention();
-            (void)deleted;  // 避免unused警告
+            (void)deleted;
         }
     }
 
-    // 处理退出时残余的缓冲事件
     FlushEventBatch(&mctx);
-
-    // 输出水位统计
     spdlog::info("[watermark] final utilization={:.1f}% level={}",
                  backpressure.GetUtilization(),
                  WatermarkBackpressure::LevelToString(backpressure.GetWatermarkLevel()));
@@ -615,17 +650,209 @@ int do_monitor(const Config& config, AlertManager &alert_mgr,
     spdlog::info("Monitoring stopped.");
     ring_buffer__free(rb);
 
-    // 解除 map pin
     bpf_map__unpin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
     bpf_map__unpin(skel->maps.watermark_level, "/sys/fs/bpf/baseline-guard/watermark_level");
-
     lsm_file_bpf__destroy(skel);
 
-    // 清理基线资源
     if (baseline_db) {
         delete baseline_db;
         g_inode_to_baseline.clear();
     }
-
     return 0;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 路径 B：内核 5.7 — BPF LSM + perf event buffer
+// ══════════════════════════════════════════════════════════════════
+static int do_monitor_perf(const Config& config, AlertManager &alert_mgr,
+                           const std::string& baseline_db_path, bool skip_boot_check) {
+    struct lsm_file_perf_bpf *skel;
+    int err;
+
+    skel = lsm_file_perf_bpf__open();
+    if (!skel) {
+        spdlog::error("[bpf_program_error] Failed to open perf BPF skeleton");
+        return 1;
+    }
+
+    // mmap_file hook 在 5.9 才引入
+    if (skel->progs.file_mmap_hook && !kernel_at_least(5, 9)) {
+        bpf_program__set_autoload(skel->progs.file_mmap_hook, false);
+        spdlog::info("[bpf_compat] mmap_file hook disabled (kernel requires 5.9+)");
+    }
+
+    err = lsm_file_perf_bpf__load(skel);
+    if (err) {
+        spdlog::error("[bpf_program_error] Failed to load perf BPF skeleton: {}", err);
+        lsm_file_perf_bpf__destroy(skel);
+        return 1;
+    }
+
+    err = lsm_file_perf_bpf__attach(skel);
+    if (err) {
+        spdlog::error("[bpf_program_error] Failed to attach perf BPF program: {}", err);
+        lsm_file_perf_bpf__destroy(skel);
+        return 1;
+    }
+    spdlog::info("[bpf_program_loaded] BPF LSM (perf buffer) attached, kernel 5.7, {} rules",
+                 config.rules.size());
+
+    // Pin drop_stats
+    (void)mkdir("/sys/fs/bpf/baseline-guard", 0755);
+    bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
+
+    int fd_actions = bpf_map__fd(skel->maps.monitor_actions);
+
+    BaselineDB* baseline_db = nullptr;
+    common_monitor_init(fd_actions, config, baseline_db_path, skip_boot_check, alert_mgr, baseline_db);
+
+    // 无水位背压（perf buffer 无利用率查询）
+    MonitorContext mctx;
+    mctx.alert_mgr = &alert_mgr;
+
+    spdlog::info("Monitoring started (perf buffer mode). Press Ctrl+C to stop.");
+
+    struct perf_buffer *pb =
+        perf_buffer__new(bpf_map__fd(skel->maps.events), 64,
+                         perf_event_cb, nullptr, &mctx, nullptr);
+    if (!pb) {
+        spdlog::error("[bpf_program_error] Failed to create perf buffer");
+        if (baseline_db) delete baseline_db;
+        lsm_file_perf_bpf__destroy(skel);
+        return 1;
+    }
+
+    run_perf_buffer_loop(pb, mctx, alert_mgr);
+
+    spdlog::info("[service_stop] monitoring loop exited");
+    spdlog::info("Monitoring stopped.");
+    perf_buffer__free(pb);
+
+    bpf_map__unpin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
+    lsm_file_perf_bpf__destroy(skel);
+
+    if (baseline_db) {
+        delete baseline_db;
+        g_inode_to_baseline.clear();
+    }
+    return 0;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 路径 C：内核 5.4 — kprobe + perf event buffer（仅告警，无法阻止）
+// ══════════════════════════════════════════════════════════════════
+static int do_monitor_kprobe(const Config& config, AlertManager &alert_mgr,
+                             const std::string& baseline_db_path, bool skip_boot_check) {
+    struct lsm_kprobe_bpf *skel;
+    int err;
+
+    spdlog::warn("[bpf_compat] kernel < 5.7, using kprobe mode — BLOCK actions degraded to ALERT only");
+
+    skel = lsm_kprobe_bpf__open();
+    if (!skel) {
+        spdlog::error("[bpf_program_error] Failed to open kprobe BPF skeleton");
+        return 1;
+    }
+
+    err = lsm_kprobe_bpf__load(skel);
+    if (err) {
+        spdlog::error("[bpf_program_error] Failed to load kprobe BPF skeleton: {}", err);
+        lsm_kprobe_bpf__destroy(skel);
+        return 1;
+    }
+
+    // 手动 attach kprobe 程序到内核函数
+    struct bpf_link *link_perm   = bpf_program__attach_kprobe(skel->progs.kprobe_file_permission, false, "security_file_permission");
+    struct bpf_link *link_chmod  = bpf_program__attach_kprobe(skel->progs.kprobe_path_chmod,     false, "security_path_chmod");
+    struct bpf_link *link_chown  = bpf_program__attach_kprobe(skel->progs.kprobe_path_chown,     false, "security_path_chown");
+    struct bpf_link *link_unlink = bpf_program__attach_kprobe(skel->progs.kprobe_inode_unlink,   false, "security_inode_unlink");
+    struct bpf_link *link_rename = bpf_program__attach_kprobe(skel->progs.kprobe_inode_rename,   false, "security_inode_rename");
+
+    if (!link_perm || !link_chmod || !link_chown || !link_unlink || !link_rename) {
+        spdlog::error("[bpf_program_error] Failed to attach one or more kprobes");
+        if (link_perm)   bpf_link__destroy(link_perm);
+        if (link_chmod)  bpf_link__destroy(link_chmod);
+        if (link_chown)  bpf_link__destroy(link_chown);
+        if (link_unlink) bpf_link__destroy(link_unlink);
+        if (link_rename) bpf_link__destroy(link_rename);
+        lsm_kprobe_bpf__destroy(skel);
+        return 1;
+    }
+    spdlog::info("[bpf_program_loaded] kprobe programs attached (5 kprobes), {} rules",
+                 config.rules.size());
+
+    // Pin drop_stats
+    (void)mkdir("/sys/fs/bpf/baseline-guard", 0755);
+    bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
+
+    int fd_actions = bpf_map__fd(skel->maps.monitor_actions);
+
+    BaselineDB* baseline_db = nullptr;
+    common_monitor_init(fd_actions, config, baseline_db_path, skip_boot_check, alert_mgr, baseline_db);
+
+    MonitorContext mctx;
+    mctx.alert_mgr = &alert_mgr;
+
+    spdlog::info("Monitoring started (kprobe mode, alert-only). Press Ctrl+C to stop.");
+
+    struct perf_buffer *pb =
+        perf_buffer__new(bpf_map__fd(skel->maps.events), 64,
+                         perf_event_cb, nullptr, &mctx, nullptr);
+    if (!pb) {
+        spdlog::error("[bpf_program_error] Failed to create perf buffer for kprobe");
+        if (baseline_db) delete baseline_db;
+        bpf_link__destroy(link_perm);
+        bpf_link__destroy(link_chmod);
+        bpf_link__destroy(link_chown);
+        bpf_link__destroy(link_unlink);
+        bpf_link__destroy(link_rename);
+        lsm_kprobe_bpf__destroy(skel);
+        return 1;
+    }
+
+    run_perf_buffer_loop(pb, mctx, alert_mgr);
+
+    spdlog::info("[service_stop] monitoring loop exited");
+    spdlog::info("Monitoring stopped.");
+    perf_buffer__free(pb);
+
+    bpf_map__unpin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
+    bpf_link__destroy(link_perm);
+    bpf_link__destroy(link_chmod);
+    bpf_link__destroy(link_chown);
+    bpf_link__destroy(link_unlink);
+    bpf_link__destroy(link_rename);
+    lsm_kprobe_bpf__destroy(skel);
+
+    if (baseline_db) {
+        delete baseline_db;
+        g_inode_to_baseline.clear();
+    }
+    return 0;
+}
+
+// ── 入口函数：根据内核版本分派到不同路径 ────────────────────────
+int do_monitor(const Config& config, AlertManager &alert_mgr,
+               const std::string& baseline_db_path, bool skip_boot_check) {
+
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+
+    auto kv = get_kernel_version();
+    spdlog::info("[kernel_detect] detected kernel {}.{}", kv.major, kv.minor);
+
+    if (kv.major > 5 || (kv.major == 5 && kv.minor >= 8)) {
+        // 5.8+: BPF LSM + ring buffer（完整功能）
+        return do_monitor_ringbuf(config, alert_mgr, baseline_db_path, skip_boot_check);
+    } else if (kv.major == 5 && kv.minor >= 7) {
+        // 5.7: BPF LSM + perf event buffer（支持 block）
+        return do_monitor_perf(config, alert_mgr, baseline_db_path, skip_boot_check);
+    } else if (kv.major == 5 && kv.minor >= 4) {
+        // 5.4~5.6: kprobe + perf event buffer（仅告警）
+        return do_monitor_kprobe(config, alert_mgr, baseline_db_path, skip_boot_check);
+    } else {
+        spdlog::error("[kernel_unsupported] kernel {}.{} not supported, minimum is 5.4",
+                     kv.major, kv.minor);
+        return 1;
+    }
 }
