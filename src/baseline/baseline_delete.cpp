@@ -1,6 +1,7 @@
 #include "baseline_delete.hpp"
 
 #include "baseline_db.hpp"
+#include "utils.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -16,15 +17,6 @@ struct DeleteOptions {
     std::vector<std::string> paths;
     bool recursive = false;
 };
-
-std::string NormalizePath(const std::string& value) {
-    std::error_code ec;
-    fs::path path = fs::absolute(fs::path(value), ec);
-    if (ec) {
-        throw std::runtime_error("cannot normalize path '" + value + "': " + ec.message());
-    }
-    return path.lexically_normal().string();
-}
 
 void PrintUsage() {
     std::cout << "Usage: baseline-guard baseline delete [options] PATH...\n"
@@ -57,11 +49,10 @@ bool ParseOptions(int argc, char* argv[], DeleteOptions& options, bool& help,
             return true;
         }
         auto take_value = [&](const std::string& option, std::string& target) {
-            if (i + 1 >= argc) {
+            if (!TakeArgValue(i, argc, argv, option, target)) {
                 error = "missing value for " + option;
                 return false;
             }
-            target = argv[++i];
             return true;
         };
         if (!end_options && arg == "--recurse") {

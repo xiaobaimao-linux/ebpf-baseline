@@ -1,6 +1,7 @@
 #include "baseline_clean.hpp"
 
 #include "baseline_db.hpp"
+#include "utils.hpp"
 
 #include <sys/stat.h>
 
@@ -41,11 +42,10 @@ bool ParseOptions(int argc, char* argv[], CleanOptions& options, bool& help,
             return true;
         }
         auto take_value = [&](const std::string& option, std::string& target) {
-            if (i + 1 >= argc) {
+            if (!TakeArgValue(i, argc, argv, option, target)) {
                 error = "missing value for " + option;
                 return false;
             }
-            target = argv[++i];
             return true;
         };
         if (arg == "--dry-run") {

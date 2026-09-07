@@ -85,11 +85,7 @@ static void do_file_check(const Rule& rule, BaselineDB& db, std::vector<CheckRes
     record.owner = std::to_string(st.st_uid);
     record.grp = std::to_string(st.st_gid);
 
-    auto now = std::chrono::system_clock::now();
-    auto time_t_now = std::chrono::system_clock::to_time_t(now);
-    std::stringstream ss;
-    ss << std::put_time(std::localtime(&time_t_now), "%Y-%m-%dT%H:%M:%S");
-    record.recorded_at = ss.str();
+    record.recorded_at = NowIso();
 
         db.SaveBaseline(record);
 
@@ -145,11 +141,7 @@ static void do_kernel_param_check(const Rule& rule, BaselineDB& db, std::vector<
     record.owner = "-";
     record.grp = "-";
 
-    auto now = std::chrono::system_clock::now();
-    auto time_t_now = std::chrono::system_clock::to_time_t(now);
-    std::stringstream ss;
-    ss << std::put_time(std::localtime(&time_t_now), "%Y-%m-%dT%H:%M:%S");
-    record.recorded_at = ss.str();
+    record.recorded_at = NowIso();
 
     db.SaveBaseline(record);
 

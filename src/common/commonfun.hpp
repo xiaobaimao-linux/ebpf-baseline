@@ -10,8 +10,11 @@
 using namespace std;
 
 
-// 获取当前时间字符串
+// 获取当前时间字符串（紧凑格式：%Y%m%d-%H:%M:%S）
 std::string NowString();
+
+// 获取当前时间字符串（ISO 格式：%Y-%m-%dT%H:%M:%S）
+std::string NowIso();
 
 // 辅助函数：判断字符串是否以指定后缀结尾
 

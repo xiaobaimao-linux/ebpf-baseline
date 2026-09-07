@@ -1,4 +1,5 @@
 #include "utils.hpp"
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <openssl/evp.h>
@@ -79,4 +80,56 @@ string compute_sha256(const string &path) {
     }
 
     return ss.str();
+}
+
+std::string NormalizePath(const std::string& value) {
+    std::error_code ec;
+    std::filesystem::path path = std::filesystem::absolute(std::filesystem::path(value), ec);
+    if (ec) {
+        throw std::runtime_error("cannot normalize path '" + value + "': " + ec.message());
+    }
+    return path.lexically_normal().string();
+}
+
+bool TakeArgValue(int& idx, int argc, char* argv[], const std::string& /*opt*/, std::string& target) {
+    if (idx + 1 >= argc) {
+        return false;
+    }
+    target = argv[++idx];
+    return true;
+}
+
+PermOwnershipDiff ComparePermOwnership(mode_t actual_mode, uid_t actual_uid, gid_t actual_gid,
+                                       const std::string& expected_perm,
+                                       int64_t expected_uid, int64_t expected_gid) {
+    PermOwnershipDiff diff;
+    std::string actual_perm = mode_to_string(actual_mode);
+    bool perm_diff = (actual_perm != expected_perm);
+    bool uid_diff  = (static_cast<int64_t>(actual_uid) != expected_uid);
+    bool gid_diff  = (static_cast<int64_t>(actual_gid) != expected_gid);
+
+    if (!perm_diff && !uid_diff && !gid_diff)
+        return diff;
+
+    diff.has_diff = true;
+    std::string exp_parts, act_parts;
+    if (perm_diff) {
+        exp_parts += "mode=" + expected_perm;
+        act_parts += "mode=" + actual_perm;
+    }
+    if (uid_diff) {
+        if (!exp_parts.empty()) exp_parts += ", ";
+        exp_parts += "uid=" + std::to_string(expected_uid);
+        if (!act_parts.empty()) act_parts += ", ";
+        act_parts += "uid=" + std::to_string(actual_uid);
+    }
+    if (gid_diff) {
+        if (!exp_parts.empty()) exp_parts += ", ";
+        exp_parts += "gid=" + std::to_string(expected_gid);
+        if (!act_parts.empty()) act_parts += ", ";
+        act_parts += "gid=" + std::to_string(actual_gid);
+    }
+    diff.expected = exp_parts;
+    diff.actual   = act_parts;
+    return diff;
 }

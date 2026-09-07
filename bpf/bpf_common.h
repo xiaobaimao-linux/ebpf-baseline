@@ -142,7 +142,7 @@ static __always_inline int emit_attr_event(void *ctx,
 #else
     struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) { inc_drop_count(); return -1; }
-    __builtin_memset(e->comm, 0, sizeof(e->comm));
+    __builtin_memset(e, 0, sizeof(*e));
 #endif
 
     e->pid        = bpf_get_current_pid_tgid() >> 32;

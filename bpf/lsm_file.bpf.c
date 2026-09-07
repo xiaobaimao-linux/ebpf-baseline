@@ -189,6 +189,6 @@ int __weak BPF_PROG(file_mmap_hook, struct file *file, unsigned long reqprot,
     int bp = check_backpressure(rule->severity);
     if (bp == BACKPRESSURE_DROP) { inc_drop_count(); return 0; }
 #endif
-    emit_attr_event(ctx, ino, dentry, EVENT_MMAP, 0, (unsigned int)reqprot, 0, 0, rule->action, bp);
+    emit_attr_event(ctx, ino, dentry, EVENT_MMAP, 0, 0, (unsigned int)reqprot, 0, rule->action, bp);
     return (rule->action == ACTION_BLOCK) ? -EPERM : 0;
 }

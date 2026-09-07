@@ -1,6 +1,7 @@
 #include "baseline_snapshot.hpp"
 
 #include "baseline_db.hpp"
+#include "commonfun.hpp"
 #include "utils.hpp"
 
 #include <fnmatch.h>
@@ -32,15 +33,6 @@ struct CollectedSnapshot {
     std::vector<SnapshotScope> scopes;
 };
 
-std::string NormalizePath(const std::string& value) {
-    std::error_code ec;
-    fs::path path = fs::absolute(fs::path(value), ec);
-    if (ec) {
-        throw std::runtime_error("cannot normalize path '" + value + "': " + ec.message());
-    }
-    return path.lexically_normal().string();
-}
-
 bool IsWithin(const std::string& path, const std::string& root) {
     return path == root ||
            (path.size() > root.size() && path.compare(0, root.size(), root) == 0 &&
@@ -58,15 +50,6 @@ bool MatchesExclude(const std::string& path, const std::vector<std::string>& exc
         }
     }
     return false;
-}
-
-std::string NowIso() {
-    const auto now = std::chrono::system_clock::now();
-    const auto time = std::chrono::system_clock::to_time_t(now);
-    std::tm tm = *std::localtime(&time);
-    char buffer[32] = {};
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", &tm);
-    return buffer;
 }
 
 std::string Join(const std::vector<std::string>& values) {
@@ -198,11 +181,10 @@ bool ParseOptions(int argc, char* argv[], SnapshotOptions& options, bool& help, 
             return true;
         }
         auto take_value = [&](const std::string& option, std::string& target) {
-            if (i + 1 >= argc) {
+            if (!TakeArgValue(i, argc, argv, option, target)) {
                 error = "missing value for " + option;
                 return false;
             }
-            target = argv[++i];
             return true;
         };
         if (!end_options && (arg == "--no-recurse")) {

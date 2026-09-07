@@ -34,12 +34,16 @@ static volatile bool running = true;
 struct KernelVersion { unsigned int major, minor; };
 
 static KernelVersion get_kernel_version() {
+    static KernelVersion cached = {0, 0};
+    static bool initialized = false;
+    if (initialized) return cached;
+
     struct utsname uts;
-    KernelVersion kv = {0, 0};
     if (uname(&uts) == 0) {
-        sscanf(uts.release, "%u.%u", &kv.major, &kv.minor);
+        sscanf(uts.release, "%u.%u", &cached.major, &cached.minor);
     }
-    return kv;
+    initialized = true;
+    return cached;
 }
 
 static bool kernel_at_least(unsigned int major, unsigned int minor) {
@@ -583,8 +587,10 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
 
     // Pin maps
     (void)mkdir("/sys/fs/bpf/baseline-guard", 0755);
-    bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
-    bpf_map__pin(skel->maps.watermark_level, "/sys/fs/bpf/baseline-guard/watermark_level");
+    if (int err = bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats"))
+        spdlog::warn("[bpf_map_pin] failed to pin drop_stats: {}", strerror(-err));
+    if (int err = bpf_map__pin(skel->maps.watermark_level, "/sys/fs/bpf/baseline-guard/watermark_level"))
+        spdlog::warn("[bpf_map_pin] failed to pin watermark_level: {}", strerror(-err));
 
     int fd_actions   = bpf_map__fd(skel->maps.monitor_actions);
     int fd_watermark = bpf_map__fd(skel->maps.watermark_level);
@@ -611,6 +617,8 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
 
     backpressure.SetRingBuffer(rb);
     backpressure.SetNumCPUs(libbpf_num_possible_cpus());
+    spdlog::info("[watermark] backpressure controller initialized (cpus={})",
+                 libbpf_num_possible_cpus());
 
     int count = 0;
     const int RETENTION_INTERVAL = 36000;
@@ -699,7 +707,8 @@ static int do_monitor_perf(const Config& config, AlertManager &alert_mgr,
 
     // Pin drop_stats
     (void)mkdir("/sys/fs/bpf/baseline-guard", 0755);
-    bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
+    if (int err = bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats"))
+        spdlog::warn("[bpf_map_pin] failed to pin drop_stats: {}", strerror(-err));
 
     int fd_actions = bpf_map__fd(skel->maps.monitor_actions);
 
@@ -783,7 +792,8 @@ static int do_monitor_kprobe(const Config& config, AlertManager &alert_mgr,
 
     // Pin drop_stats
     (void)mkdir("/sys/fs/bpf/baseline-guard", 0755);
-    bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
+    if (int err = bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats"))
+        spdlog::warn("[bpf_map_pin] failed to pin drop_stats: {}", strerror(-err));
 
     int fd_actions = bpf_map__fd(skel->maps.monitor_actions);
 

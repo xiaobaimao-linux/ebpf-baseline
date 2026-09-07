@@ -50,15 +50,6 @@ struct CheckFinding {
 
 // ── helpers ──────────────────────────────────────────────────────────
 
-std::string NowIso() {
-    const auto now = std::chrono::system_clock::now();
-    const auto time = std::chrono::system_clock::to_time_t(now);
-    std::tm tm = *std::localtime(&time);
-    char buffer[32] = {};
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", &tm);
-    return buffer;
-}
-
 void PrintUsage() {
     std::cout << "Usage: baseline-guard baseline check [options]\n"
               << "Offline baseline integrity check against SQLite baseline entries.\n"
@@ -89,11 +80,10 @@ bool ParseOptions(int argc, char* argv[], CheckOptions& options, bool& help,
             return true;
         }
         auto take_value = [&](const std::string& opt, std::string& target) {
-            if (i + 1 >= argc) {
+            if (!TakeArgValue(i, argc, argv, opt, target)) {
                 error = "missing value for " + opt;
                 return false;
             }
-            target = argv[++i];
             return true;
         };
         if (arg == "--db") {
@@ -175,36 +165,16 @@ std::vector<CheckFinding> CheckOneEntry(const CheckEntry& entry) {
     }
 
     // check permission / uid / gid (always, regardless of hash result)
-    std::string actual_perm = mode_to_string(st.st_mode & 0777);
-    bool perm_diff = (actual_perm != entry.permission);
-    bool uid_diff  = (static_cast<int64_t>(st.st_uid) != entry.uid);
-    bool gid_diff  = (static_cast<int64_t>(st.st_gid) != entry.gid);
-
-    if (perm_diff || uid_diff || gid_diff) {
+    auto diff = ComparePermOwnership(st.st_mode & 0777, st.st_uid, st.st_gid,
+                                     entry.permission, entry.uid, entry.gid);
+    if (diff.has_diff) {
         CheckFinding pf;
         pf.file_path = entry.file_path;
         pf.event_type = "perm_changed";
         pf.severity   = "medium";
-        std::string exp_parts, act_parts;
-        if (perm_diff) {
-            exp_parts += "mode=" + entry.permission;
-            act_parts += "mode=" + actual_perm;
-        }
-        if (uid_diff) {
-            if (!exp_parts.empty()) exp_parts += ", ";
-            exp_parts += "uid=" + std::to_string(entry.uid);
-            if (!act_parts.empty()) act_parts += ", ";
-            act_parts += "uid=" + std::to_string(st.st_uid);
-        }
-        if (gid_diff) {
-            if (!exp_parts.empty()) exp_parts += ", ";
-            exp_parts += "gid=" + std::to_string(entry.gid);
-            if (!act_parts.empty()) act_parts += ", ";
-            act_parts += "gid=" + std::to_string(st.st_gid);
-        }
-        pf.expected = exp_parts;
-        pf.actual   = act_parts;
-        pf.details  = hash_changed
+        pf.expected   = diff.expected;
+        pf.actual     = diff.actual;
+        pf.details    = hash_changed
                           ? "permission/ownership changed (hash also changed)"
                           : "permission/ownership changed (hash unchanged)";
         findings.push_back(std::move(pf));

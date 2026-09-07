@@ -10,6 +10,15 @@ std::string NowString() {
     return ss.str();
 }
 
+std::string NowIso() {
+    const auto now = std::chrono::system_clock::now();
+    const auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = *std::localtime(&time);
+    char buffer[32] = {};
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", &tm);
+    return buffer;
+}
+
 
 // 辅助函数：判断字符串是否以指定后缀结尾
 bool ends_with(const string& str, const string& suffix) {

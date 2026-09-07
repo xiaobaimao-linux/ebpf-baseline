@@ -50,34 +50,14 @@ std::vector<BaselineDeviation> CompareWithBaseline(const CheckEntry& baseline,
     }
 
     // 4. 无论 hash 是否变化，都比对 permission / uid / gid
-    std::string actual_perm = mode_to_string(st.st_mode & 0777);
-    bool perm_diff = (actual_perm != baseline.permission);
-    bool uid_diff  = (static_cast<int64_t>(st.st_uid) != baseline.uid);
-    bool gid_diff  = (static_cast<int64_t>(st.st_gid) != baseline.gid);
-
-    if (perm_diff || uid_diff || gid_diff) {
+    auto diff = ComparePermOwnership(st.st_mode & 0777, st.st_uid, st.st_gid,
+                                     baseline.permission, baseline.uid, baseline.gid);
+    if (diff.has_diff) {
         BaselineDeviation dev;
         dev.event_type = "perm_changed";
         dev.severity   = "medium";
-        std::string exp_parts, act_parts;
-        if (perm_diff) {
-            exp_parts += "mode=" + baseline.permission;
-            act_parts += "mode=" + actual_perm;
-        }
-        if (uid_diff) {
-            if (!exp_parts.empty()) exp_parts += ", ";
-            exp_parts += "uid=" + std::to_string(baseline.uid);
-            if (!act_parts.empty()) act_parts += ", ";
-            act_parts += "uid=" + std::to_string(st.st_uid);
-        }
-        if (gid_diff) {
-            if (!exp_parts.empty()) exp_parts += ", ";
-            exp_parts += "gid=" + std::to_string(baseline.gid);
-            if (!act_parts.empty()) act_parts += ", ";
-            act_parts += "gid=" + std::to_string(st.st_gid);
-        }
-        dev.expected = exp_parts;
-        dev.actual   = act_parts;
+        dev.expected   = diff.expected;
+        dev.actual     = diff.actual;
         findings.push_back(std::move(dev));
     }
 

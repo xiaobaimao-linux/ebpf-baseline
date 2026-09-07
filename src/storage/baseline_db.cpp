@@ -1,4 +1,5 @@
 #include "baseline_db.hpp"
+#include "commonfun.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -658,6 +659,26 @@ std::vector<BaselineRecord> BaselineDB::GetAllBaselines() {
 }
 
 
+// 辅助函数：从 sqlite3_stmt 读取一行 AlertRecord（14 列）
+static AlertRecord ReadAlertRecord(sqlite3_stmt* stmt) {
+    AlertRecord r;
+    r.rule_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    r.rule_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+    r.severity = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+    r.file_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+    r.event_type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+    r.process_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+    r.pid = sqlite3_column_int(stmt, 6);
+    r.user_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
+    r.uid = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+    r.expected = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+    r.actual = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+    r.action_taken = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11));
+    r.dingtalk_sent = sqlite3_column_int(stmt, 12) != 0;
+    r.recorded_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 13));
+    return r;
+}
+
 // 查询告警记录：支持 rule 过滤、今日过滤、数量限制
 std::vector<AlertRecord> BaselineDB::GetAlerts(const std::string &rule_filter, int limit,
                                                bool today) {
@@ -719,22 +740,7 @@ std::vector<AlertRecord> BaselineDB::GetAlerts(const std::string &rule_filter, i
 
     std::vector<AlertRecord> results;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        AlertRecord r;
-        r.rule_id = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0));
-        r.rule_name = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
-        r.severity = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
-        r.file_path = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
-        r.event_type = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
-        r.process_name = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
-        r.pid = sqlite3_column_int(stmt, 6);
-        r.user_name = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 7));
-        r.uid = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 8));
-        r.expected = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 9));
-        r.actual = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 10));
-        r.action_taken = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 11));
-        r.dingtalk_sent = sqlite3_column_int(stmt, 12) != 0;
-        r.recorded_at = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 13));
-        results.push_back(r);
+        results.push_back(ReadAlertRecord(stmt));
     }
 
     sqlite3_finalize(stmt);
@@ -785,22 +791,7 @@ std::vector<AlertRecord> BaselineDB::GetMonitorEvents(const std::string& start,
 
     std::vector<AlertRecord> results;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        AlertRecord r;
-        r.rule_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        r.rule_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        r.severity = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        r.file_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-        r.event_type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
-        r.process_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
-        r.pid = sqlite3_column_int(stmt, 6);
-        r.user_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
-        r.uid = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
-        r.expected = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
-        r.actual = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
-        r.action_taken = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11));
-        r.dingtalk_sent = sqlite3_column_int(stmt, 12) != 0;
-        r.recorded_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 13));
-        results.push_back(r);
+        results.push_back(ReadAlertRecord(stmt));
     }
     sqlite3_finalize(stmt);
     return results;
@@ -901,14 +892,7 @@ int BaselineDB::DeleteBaselineEntries(const std::vector<std::string>& paths, boo
         return 0;
     }
 
-    const auto now_str = [&]() {
-        const auto now = std::chrono::system_clock::now();
-        const auto time = std::chrono::system_clock::to_time_t(now);
-        std::tm tm = *std::localtime(&time);
-        char buffer[32] = {};
-        std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", &tm);
-        return std::string(buffer);
-    }();
+    const std::string now_str = NowIso();
 
     int deleted_count = 0;
     for (const auto& entry : to_delete) {

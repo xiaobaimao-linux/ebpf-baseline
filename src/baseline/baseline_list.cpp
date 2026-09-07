@@ -77,11 +77,10 @@ bool ParseOptions(int argc, char* argv[], ListOptions& options, bool& help,
             return true;
         };
         auto take_value = [&](const std::string& option, std::string& target) {
-            if (i + 1 >= argc) {
+            if (!TakeArgValue(i, argc, argv, option, target)) {
                 error = "missing value for " + option;
                 return false;
             }
-            target = argv[++i];
             return true;
         };
         if (!end_options && arg == "--json") {
