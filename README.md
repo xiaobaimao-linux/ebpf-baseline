@@ -228,13 +228,18 @@ sudo ./baseline-guard report -o fim_audit_report.html
 谛听（Diting）/
 ├── src/
 │   ├── main.cpp                      # CLI命令入口分发
-│   ├── alerts/                       # 告警持久化、钉钉推送逻辑
-│   ├── baseline/                     # snapshot/list/delete/check/clean子命令实现
-│   ├── cli/                          # 命令行参数、YAML配置解析
+│   ├── asset/                        # [M1 预留] 资产清点
+│   ├── baseline/                     # [M2] snapshot/list/delete/check/clean子命令、
+│   │                                 #      eBPF FIM监控引擎、HTML审计报表生成
+│   ├── detect/                       # [M3 预留] 威胁检测
+│   ├── ai/                           # [M4 预留] AI工作负载防护
+│   ├── alerts/                       # [M5] 告警持久化、钉钉推送逻辑
+│   ├── storage/                      # [M6] SQLite数据库增删改查层
+│   ├── cli/                          # [M7] 命令行参数、YAML配置解析
+│   ├── ops/                          # [M8] 自身运维（eBPF丢包统计等诊断）
 │   ├── common/                       # SHA256、文件权限、日志通用工具
-│   ├── monitor/                      # eBPF加载、事件处理、双模式调度
-│   ├── report/                       # HTML审计报表生成
-│   └── storage/                      # SQLite数据库增删改查层
+│   └── ebpf/                         # [预留] eBPF用户态遥测加载层
+├── manager/                          # [M9 预留] 管理中心（企业版）
 ├── bpf/
 │   ├── lsm_file.bpf.c                # eBPF LSM内核监控程序
 │   ├── vmlinux.h / event.h           # 内核结构体、事件定义

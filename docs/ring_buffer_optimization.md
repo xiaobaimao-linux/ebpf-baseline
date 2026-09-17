@@ -33,8 +33,8 @@ eBPF 向用户态传递数据主要有两种方式：
 
 ```
 bpf/lsm_file.bpf.c:14-17    → Ring Buffer map 定义（256KB）
-src/monitor/monitor.cpp:525   → ring_buffer__new() 创建用户态消费者
-src/monitor/monitor.cpp:547   → ring_buffer__poll(rb, 100) 主循环轮询
+src/baseline/monitor.cpp:525   → ring_buffer__new() 创建用户态消费者
+src/baseline/monitor.cpp:547   → ring_buffer__poll(rb, 100) 主循环轮询
 ```
 
 ---
@@ -103,7 +103,7 @@ src/monitor/monitor.cpp:547   → ring_buffer__poll(rb, 100) 主循环轮询
 #define WATERMARK_OVERLOAD 3   // 95% ~ 100%  过载水位
 ```
 
-阈值定义在 `src/monitor/watermark_backpressure.hpp`：
+阈值定义在 `src/baseline/watermark_backpressure.hpp`：
 
 ```cpp
 static constexpr double kWarningThreshold  = 70.0;
@@ -124,7 +124,7 @@ static constexpr double kOverloadThreshold = 95.0;
 
 计算周期：每 100 次 `ring_buffer__poll()`（约 10 秒）执行一次。
 
-代码位置：`src/monitor/watermark_backpressure.cpp`
+代码位置：`src/baseline/watermark_backpressure.cpp`
 
 ### 3.4 背压策略矩阵
 
@@ -223,12 +223,12 @@ FlushEventBatch()
 ### 4.4 代码位置
 
 ```
-src/monitor/monitor.cpp:266   → kMaxBatchSize 常量
-src/monitor/monitor.cpp:268   → MonitorContext 结构体（含 event_batch）
-src/monitor/monitor.cpp:279   → handle_event() 回调（入队）
-src/monitor/monitor.cpp:384   → FlushEventBatch() 批量处理
-src/monitor/monitor.cpp:554   → 主循环中调用 FlushEventBatch
-src/monitor/monitor.cpp:574   → 退出时 flush 残余事件
+src/baseline/monitor.cpp:266   → kMaxBatchSize 常量
+src/baseline/monitor.cpp:268   → MonitorContext 结构体（含 event_batch）
+src/baseline/monitor.cpp:279   → handle_event() 回调（入队）
+src/baseline/monitor.cpp:384   → FlushEventBatch() 批量处理
+src/baseline/monitor.cpp:554   → 主循环中调用 FlushEventBatch
+src/baseline/monitor.cpp:574   → 退出时 flush 残余事件
 ```
 
 ---
@@ -239,6 +239,6 @@ src/monitor/monitor.cpp:574   → 退出时 flush 残余事件
 |------|------|
 | `bpf/event.h` | 水位常量、严重等级、事件结构体定义（内核态/用户态共用唯一源头） |
 | `bpf/lsm_file.bpf.c` | eBPF LSM hook、Ring Buffer map、背压决策 `check_backpressure()` |
-| `src/monitor/watermark_backpressure.hpp/cpp` | 用户态水位计算控制器 |
-| `src/monitor/monitor.cpp` | 主循环、批量缓冲、事件处理逻辑 |
-| `src/stats/stats.cpp` | 读取 `drop_stats` map 展示丢弃统计 |
+| `src/baseline/watermark_backpressure.hpp/cpp` | 用户态水位计算控制器 |
+| `src/baseline/monitor.cpp` | 主循环、批量缓冲、事件处理逻辑 |
+| `src/ops/stats.cpp` | 读取 `drop_stats` map 展示丢弃统计 |

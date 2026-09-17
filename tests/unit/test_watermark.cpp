@@ -1,8 +1,8 @@
 // 单元测试：四级水位控制器
-// 编译: g++ -std=c++17 -I../../src -I../../src/monitor -I../../src/common \
+// 编译: g++ -std=c++17 -I../../src -I../../src/baseline -I../../src/common \
 //       -I../../src/alerts -I../../src/storage -I../../src/cli -I../../bpf \
 //       -o test_watermark test_watermark.cpp \
-//       ../../src/monitor/watermark_backpressure.cpp \
+//       ../../src/baseline/watermark_backpressure.cpp \
 //       ../../src/storage/baseline_db.cpp ../../src/common/commonfun.cpp \
 //       -lsqlite3 -lfmt -lssl -lcrypto -lbpf
 

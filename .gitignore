@@ -1,5 +1,27 @@
+
+bpf/lsm_filename.c
+bpf/test_filename_lookup
+bpf/test_filename_lookup.c
+bpf/bpf_common.h
+
+
+# 编译中间文件
 *.o
 *.d
 *.db
-*.html
+
+# 测试/调试产物
+dump.txt
 baseline-guard
+req/
+back/
+
+# BPF 自动生成的头文件
+bpf/*.skel.h
+
+# 测试二进制文件
+bpf/test_filename_lookup
+tests/test_config
+tests/test_utils
+tests/unit/test_watermark
+tests/unit/test_config

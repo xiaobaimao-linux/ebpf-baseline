@@ -1,5 +1,5 @@
 #include "monitor.hpp"
-#include "../bpf/event.h"
+#include "bpf/event.h"
 #include "monitor_baseline.hpp"
 #include "watermark_backpressure.hpp"
 #include "utils.hpp"
@@ -23,10 +23,10 @@
 #include <vector>
 #include <sstream>
 
-// 包含生成的skeleton头文件
-#include "../bpf/lsm_file.skel.h"        // 5.8+ ring buffer
-#include "../bpf/lsm_file_perf.skel.h"   // 5.7 perf buffer
-#include "../bpf/lsm_kprobe.skel.h"      // 5.4 kprobe
+// 包含生成的skeleton头文件（经 -I. 从仓库根目录引用 bpf/）
+#include "bpf/lsm_file.skel.h"        // 5.8+ ring buffer
+#include "bpf/lsm_file_perf.skel.h"   // 5.7 perf buffer
+#include "bpf/lsm_kprobe.skel.h"      // 5.4 kprobe
 
 static volatile bool running = true;
 

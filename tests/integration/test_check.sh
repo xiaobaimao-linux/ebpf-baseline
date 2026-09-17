@@ -187,7 +187,7 @@ else
     exit 1
 fi
 // 单元测试：工具函数
-// 编译: g++ -std=c++17 -I../../include -I../../src -o test_utils test_utils.cpp ../../src/utils.cpp $(pkg-config --libs openssl) -lfmt
+// 编译: g++ -std=c++17 -I../../include -I../../src -I../../src/common -o test_utils test_utils.cpp ../../src/common/utils.cpp $(pkg-config --libs openssl) -lfmt
 
 #include <cassert>
 #include <cstdio>

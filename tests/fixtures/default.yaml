@@ -38,6 +38,17 @@ rules:
         - "delete"              # 删除事件
       action: "block"           # 事件触发时的动作: alert / block
 
+  - id: "SYS-MONITOR-/tmp/fim_bench"
+    name: "监控敏感文件读取 - /tmp/fim_bench"
+    severity: "critical"
+    monitor:
+      path: "/tmp/fim_bench"       # 要监控的文件路径
+      events:                   # 需要监控的事件列表
+        - "read"                # 读取事件
+        - "write"               # 写入事件
+        - "delete"              # 删除事件
+      action: "report_only"           # 事件触发时的动作: alert / block
+
   # --- 示例规则 4: 同时包含 check 和 monitor 的规则 ---
   - id: "SYS-COMBO-001"
     name: "综合监控 - 用户配置文件 /home/sf/combo.txt.12345678901234567890"

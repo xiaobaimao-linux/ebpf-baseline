@@ -2,16 +2,21 @@ CXX = g++
 CC = gcc
 BPF_CC = clang
 
-INCLUDE_DIRS = -I./include \
+# src 子目录按 PRD 第 5 章九子系统划分：
+#   asset=M1(预留) baseline=M2 detect=M3(预留) ai=M4(预留)
+#   alerts=M5 storage=M6 cli=M7 ops=M8 ebpf=遥测层(预留)
+INCLUDE_DIRS = -I. \
+               -I./include \
                -I./src \
                -I./src/alerts \
+               -I./src/asset \
                -I./src/baseline \
-               -I./src/check \
                -I./src/cli \
                -I./src/common \
-               -I./src/monitor \
-               -I./src/report \
-               -I./src/stats \
+               -I./src/detect \
+               -I./src/ai \
+               -I./src/ebpf \
+               -I./src/ops \
                -I./src/storage \
                -I./bpf
 
@@ -45,17 +50,17 @@ MAIN_SRCS = src/main.cpp \
             src/baseline/baseline_delete.cpp \
             src/baseline/baseline_list.cpp \
             src/baseline/baseline_snapshot.cpp \
-            src/check/check.cpp \
+            src/baseline/check.cpp \
+            src/baseline/monitor_baseline.cpp \
+            src/baseline/report_generator.cpp \
             src/cli/config.cpp \
             src/common/commonfun.cpp \
             src/common/utils.cpp \
-            src/monitor/monitor_baseline.cpp \
-            src/report/report_generator.cpp \
+            src/ops/stats.cpp \
             src/storage/baseline_db.cpp
-MONITOR_SRC = src/monitor/monitor.cpp src/monitor/watermark_backpressure.cpp
-STATS_SRC = src/stats/stats.cpp
+MONITOR_SRC = src/baseline/monitor.cpp src/baseline/watermark_backpressure.cpp
 
-OBJS = $(MAIN_SRCS:.cpp=.o) $(MONITOR_SRC:.cpp=.o) $(STATS_SRC:.cpp=.o)
+OBJS = $(MAIN_SRCS:.cpp=.o) $(MONITOR_SRC:.cpp=.o)
 DEPS = $(OBJS:.o=.d)
 
 .PHONY: all clean test test-monitor test-snapshot
@@ -90,7 +95,7 @@ $(BPF_KPROBE_SKEL): $(BPF_KPROBE_OBJ)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # monitor 依赖生成的 skeleton 头文件
-src/monitor/monitor.o: src/monitor/monitor.cpp $(BPF_SKEL) $(BPF_SKEL_PERF) $(BPF_KPROBE_SKEL)
+src/baseline/monitor.o: src/baseline/monitor.cpp $(BPF_SKEL) $(BPF_SKEL_PERF) $(BPF_KPROBE_SKEL)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # 链接
