@@ -69,7 +69,13 @@ static void do_file_check(const Rule& rule, BaselineDB& db, std::vector<CheckRes
 
     if (has_hash_check) {
         actual_hash = compute_sha256(const_cast<string&>(target_path));
-        if (actual_hash == rule.check_hash) {
+        // 期望值允许带 "sha256:" 前缀（YAML 规则书写习惯），比对前统一剥离
+        std::string expected_hash = rule.check_hash;
+        const std::string hash_prefix = "sha256:";
+        if (expected_hash.rfind(hash_prefix, 0) == 0) {
+            expected_hash = expected_hash.substr(hash_prefix.size());
+        }
+        if (actual_hash == expected_hash) {
             log_pass(rule.name, "hash匹配");
         } else {
             log_fail(rule.name, "hash不匹配");

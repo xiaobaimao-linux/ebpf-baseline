@@ -23,11 +23,17 @@ struct DbConfig {
     int retention_max_records = 10000; // 告警最大记录数：默认1万条，0=不限制
 };
 
+// 遥测配置（独立节点 telemetry:）
+struct TelemetryConfig {
+    bool network = false;              // 网络连接事件遥测（connect/accept/bind），默认关闭
+};
+
 
 struct Config {
     std::vector<Rule> rules;
     AlertConfig alert;   // 
     DbConfig db;         // 数据库保留策略配置
+    TelemetryConfig telemetry;  // 遥测开关
 };
 
 

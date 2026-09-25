@@ -102,3 +102,7 @@ alert:
 db:
   retention_days: 30
   retention_max_records: 10000
+
+# 遥测配置
+telemetry:
+  network: false   # 网络连接事件遥测（connect/accept/bind），默认关闭

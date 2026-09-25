@@ -1,6 +1,7 @@
 #include "monitor.hpp"
 #include "bpf/event.h"
 #include "monitor_baseline.hpp"
+#include "monitor_network.hpp"
 #include "watermark_backpressure.hpp"
 #include "utils.hpp"
 #include "config.hpp"
@@ -9,6 +10,7 @@
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
+#include <cerrno>
 #include <csignal>
 #include <cstring>
 #include <fstream>
@@ -16,9 +18,11 @@
 #include <linux/types.h>
 #include <pwd.h>
 #include <spdlog/spdlog.h>
+#include <sys/epoll.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
+#include <unistd.h>
 #include <unordered_map>
 #include <vector>
 #include <sstream>
@@ -620,15 +624,69 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
     spdlog::info("[watermark] backpressure controller initialized (cpus={})",
                  libbpf_num_possible_cpus());
 
+    // ── 网络遥测（仅 telemetry.network: true 时启动；失败降级为纯文件监控）──
+    struct net_watch_bpf *net_skel = nullptr;
+    struct ring_buffer *net_rb = nullptr;
+    if (config.telemetry.network) {
+        net_skel = network_monitor_start(&net_rb);
+        if (!net_skel)
+            spdlog::warn("[telemetry.network] net_watch 启动失败，降级为仅文件监控");
+    }
+
+    // epoll 同时等待文件事件 rb 与 net_events rb（网络遥测开启时启用）
+    int epollfd = -1;
+    int rb_fd = -1, net_rb_fd = -1;
+    bool net_active = false;
+    if (net_skel && net_rb) {
+        epollfd   = epoll_create1(0);
+        rb_fd     = ring_buffer__epoll_fd(rb);
+        net_rb_fd = ring_buffer__epoll_fd(net_rb);
+        if (epollfd < 0 || rb_fd < 0 || net_rb_fd < 0) {
+            spdlog::error("[bpf_program_error] epoll setup failed (epollfd={}, rb_fd={}, net_rb_fd={})",
+                          epollfd, rb_fd, net_rb_fd);
+        } else {
+            struct epoll_event ev {};
+            ev.events = EPOLLIN;
+            ev.data.fd = rb_fd;
+            if (epoll_ctl(epollfd, EPOLL_CTL_ADD, rb_fd, &ev) == 0) {
+                ev.data.fd = net_rb_fd;
+                if (epoll_ctl(epollfd, EPOLL_CTL_ADD, net_rb_fd, &ev) == 0)
+                    net_active = true;
+            }
+        }
+        if (!net_active) {
+            network_monitor_stop(net_skel, net_rb);
+            net_skel = nullptr;
+            net_rb = nullptr;
+            if (epollfd >= 0) close(epollfd);
+            epollfd = -1;
+        }
+    }
+
     int count = 0;
     const int RETENTION_INTERVAL = 36000;
     const int WATERMARK_INTERVAL = 100;
     while (running) {
         count++;
-        err = ring_buffer__poll(rb, 100);
-        if (err < 0 && err != -EINTR) {
-            spdlog::error("[bpf_program_error] Error polling ring buffer: {}", err);
-            break;
+        if (net_active) {
+            struct epoll_event evs[2];
+            int n = epoll_wait(epollfd, evs, 2, 100);
+            if (n < 0 && errno != EINTR) {
+                spdlog::error("[bpf_program_error] Error waiting epoll: {}", errno);
+                break;
+            }
+            for (int i = 0; i < n; i++) {
+                if (evs[i].data.fd == rb_fd)
+                    ring_buffer__consume(rb);
+                else if (evs[i].data.fd == net_rb_fd)
+                    ring_buffer__consume(net_rb);
+            }
+        } else {
+            err = ring_buffer__poll(rb, 100);
+            if (err < 0 && err != -EINTR) {
+                spdlog::error("[bpf_program_error] Error polling ring buffer: {}", err);
+                break;
+            }
         }
         FlushEventBatch(&mctx);
 
@@ -656,6 +714,10 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
 
     spdlog::info("[service_stop] monitoring loop exited");
     spdlog::info("Monitoring stopped.");
+    if (net_active)
+        close(epollfd);
+    if (net_skel)
+        network_monitor_stop(net_skel, net_rb);
     ring_buffer__free(rb);
 
     bpf_map__unpin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");

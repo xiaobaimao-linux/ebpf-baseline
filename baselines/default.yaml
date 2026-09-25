@@ -117,3 +117,7 @@ rules:
 #       on_failure: "report_only"
 # ================================================
 
+
+# 遥测配置
+telemetry:
+  network: false   # 网络连接事件遥测（connect/accept/bind），默认关闭

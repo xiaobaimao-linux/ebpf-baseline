@@ -156,6 +156,19 @@ Config parseYamlFile(const string &filename) {
             }
         }
 
+        // 解析 telemetry: 节点（遥测开关）
+        if (root["telemetry"]) {
+            const YAML::Node &telemetryNode = root["telemetry"];
+            if (telemetryNode["network"]) {
+                try {
+                    config.telemetry.network = telemetryNode["network"].as<bool>();
+                    spdlog::info("网络遥测: {}", config.telemetry.network ? "开启" : "关闭");
+                } catch (const YAML::Exception &e) {
+                    spdlog::warn("无法解析 telemetry.network 值: {}", e.what());
+                }
+            }
+        }
+
         if (!root["rules"]) {
             spdlog::error("YAML 文件缺少 'rules' 根节点: {}", filename);
             return config;

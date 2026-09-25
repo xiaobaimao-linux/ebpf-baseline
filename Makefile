@@ -21,9 +21,11 @@ INCLUDE_DIRS = -I. \
                -I./bpf
 
 CXXFLAGS = -std=c++17 -Wall -Wextra -g -MMD -MP $(INCLUDE_DIRS)
+# -Wno-missing-declarations：完整版 vmlinux.h 含未实例化的前向声明成员，
+# 会触发 -Wmissing-declarations（旧精简版 vmlinux.h 无此问题），非代码缺陷
 BPF_CFLAGS = -target bpf -D__TARGET_ARCH_x86 \
              -I/usr/include/x86_64-linux-gnu \
-             -I/usr/include/bpf -g -O2
+             -I/usr/include/bpf -g -O2 -Wno-missing-declarations
 
 LDFLAGS = -lbpf -lssl -lcrypto -lfmt -lyaml-cpp -lsqlite3 -lcurl
 
@@ -42,6 +44,11 @@ BPF_KPROBE_SRC = bpf/lsm_kprobe.bpf.c
 BPF_KPROBE_OBJ = bpf/lsm_kprobe.bpf.o
 BPF_KPROBE_SKEL = bpf/lsm_kprobe.skel.h
 
+# 网络遥测版本（connect/accept/bind，独立源文件）
+BPF_NET_SRC = bpf/net_watch.bpf.c
+BPF_NET_OBJ = bpf/net_watch.bpf.o
+BPF_NET_SKEL = bpf/net_watch.skel.h
+
 # 用户态源文件
 MAIN_SRCS = src/main.cpp \
             src/alerts/alert_manager.cpp \
@@ -56,9 +63,12 @@ MAIN_SRCS = src/main.cpp \
             src/cli/config.cpp \
             src/common/commonfun.cpp \
             src/common/utils.cpp \
+            src/common/container.cpp \
             src/ops/stats.cpp \
             src/storage/baseline_db.cpp
-MONITOR_SRC = src/baseline/monitor.cpp src/baseline/watermark_backpressure.cpp
+MONITOR_SRC = src/baseline/monitor.cpp \
+              src/baseline/monitor_network.cpp \
+              src/baseline/watermark_backpressure.cpp
 
 OBJS = $(MAIN_SRCS:.cpp=.o) $(MONITOR_SRC:.cpp=.o)
 DEPS = $(OBJS:.o=.d)
@@ -90,12 +100,25 @@ $(BPF_KPROBE_OBJ): $(BPF_KPROBE_SRC) $(BPF_COMMON_H)
 $(BPF_KPROBE_SKEL): $(BPF_KPROBE_OBJ)
 	bpftool gen skeleton $< > $@
 
+# 网络遥测版本（ring buffer，结构同 lsm_file）
+BPF_NET_H = bpf/net_event.h bpf/vmlinux.h
+
+$(BPF_NET_OBJ): $(BPF_NET_SRC) $(BPF_NET_H)
+	$(BPF_CC) $(BPF_CFLAGS) -c -o $@ $<
+
+$(BPF_NET_SKEL): $(BPF_NET_OBJ)
+	bpftool gen skeleton $< > $@
+
 # 编译用户态源文件
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # monitor 依赖生成的 skeleton 头文件
 src/baseline/monitor.o: src/baseline/monitor.cpp $(BPF_SKEL) $(BPF_SKEL_PERF) $(BPF_KPROBE_SKEL)
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+# monitor_network 依赖 net_watch skeleton 头文件
+src/baseline/monitor_network.o: src/baseline/monitor_network.cpp $(BPF_NET_SKEL)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # 链接
@@ -113,6 +136,6 @@ test-snapshot: $(TARGET)
 
 clean:
 	find src -type f \( -name '*.o' -o -name '*.d' \) -delete
-	rm -f $(TARGET) $(BPF_OBJ) $(BPF_SKEL) $(BPF_OBJ_PERF) $(BPF_SKEL_PERF) $(BPF_KPROBE_OBJ) $(BPF_KPROBE_SKEL)
+	rm -f $(TARGET) $(BPF_OBJ) $(BPF_SKEL) $(BPF_OBJ_PERF) $(BPF_SKEL_PERF) $(BPF_KPROBE_OBJ) $(BPF_KPROBE_SKEL) $(BPF_NET_OBJ) $(BPF_NET_SKEL)
 
 -include $(DEPS)
