@@ -1,0 +1,41 @@
+# W2 全链路验收配置（基线监控模式 + 全量遥测）
+# 用法: sudo ./baseline-guard monitor --db baseline.db -c config.yaml
+
+# ── 遥测开关 ──
+telemetry:
+  network: true        # connect/accept/bind 网络连接遥测
+  dns: true            # DNS 查询遥测（随 net_watch 加载）
+  privilege: true      # setuid/capset/ptrace/module_load/mount 权限遥测
+  store: true          # 事件落库 events 表（exec/network/dns/priv）
+  events_db: "events.db"
+  batch_size: 500      # 一事务批量条数
+  batch_ms: 200        # 批量 flush 间隔（毫秒）
+
+# ── 纯 YAML 文件规则（read 事件走 file_open LSM 钩子）──
+rules:
+  - id: "W2-FILE-001"
+    name: "监控敏感文件读取 - /etc/shadow"
+    severity: "critical"
+    monitor:
+      path: "/etc/shadow"
+      events: ["read", "write", "delete", "chmod"]
+      action: "alert"
+
+  - id: "W2-FILE-002"
+    name: "监控 /tmp/fimtest_target.txt"
+    severity: "medium"
+    monitor:
+      path: "/tmp/fimtest_target.txt"
+      events: ["write", "delete", "chmod"]
+      action: "alert"
+
+# ── 告警（webhook 留空，仅本地落 alerts 表，避免测试时推送钉钉）──
+alert:
+  dingtalk:
+    webhook: ""
+    secret: ""
+  throttle: 300
+
+db:
+  retention_days: 30
+  retention_max_records: 10000
