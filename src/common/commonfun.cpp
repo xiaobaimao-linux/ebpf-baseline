@@ -10,6 +10,15 @@ std::string NowString() {
     return ss.str();
 }
 
+std::string NowIso() {
+    const auto now = std::chrono::system_clock::now();
+    const auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = *std::localtime(&time);
+    char buffer[32] = {};
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", &tm);
+    return buffer;
+}
+
 
 // 辅助函数：判断字符串是否以指定后缀结尾
 bool ends_with(const string& str, const string& suffix) {
@@ -33,4 +42,26 @@ std::string GetHostname() {
     }
     
     return "unknown";
+}
+
+std::string NormalizeTimestamp(const std::string &timestamp) {
+    if (timestamp.size() >= 19 && timestamp[4] == '-' && timestamp[7] == '-') {
+        return timestamp;
+    }
+
+    if (timestamp.size() >= 17 && timestamp[8] == '-') {
+        return timestamp.substr(0, 4) + "-" + timestamp.substr(4, 2) + "-" +
+               timestamp.substr(6, 2) + " " + timestamp.substr(9, 2) + ":" +
+               timestamp.substr(12, 2) + ":" + timestamp.substr(15, 2);
+    }
+
+    return timestamp;
+}
+
+
+std::string SeverityClass(const std::string &severity) {
+    if (severity == "critical" || severity == "high" || severity == "medium" || severity == "low") {
+        return "severity-" + severity;
+    }
+    return "";
 }

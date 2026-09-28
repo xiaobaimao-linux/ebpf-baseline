@@ -117,3 +117,9 @@ rules:
 #       on_failure: "report_only"
 # ================================================
 
+
+# 遥测配置
+telemetry:
+  network: false   # 网络连接事件遥测（connect/accept/bind），默认关闭
+  dns: false       # DNS 查询遥测（UDP 53，network.dns 事件），默认关闭
+  privilege: false # 权限与命名空间事件遥测（setuid/capset/ptrace/module_load/mount/unshare/setns），默认关闭

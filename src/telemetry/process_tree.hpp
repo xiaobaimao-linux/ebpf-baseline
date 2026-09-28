@@ -1,0 +1,61 @@
+#pragma once
+
+#include <cstdint>
+#include <cstring>
+#include <list>
+#include <string>
+#include <unordered_map>
+
+#include "event_record.hpp"   // record_set_str
+#include "proc_event.h"       // PROC_KIND_*（bpf 头，纯数值宏）
+
+// ── 进程树节点 ────────────────────────────────────────────────────
+// 进程身份为 (pid, start_time)：pid 为 map 键，start_time 为版本号，
+// 用于识别 pid 复用（同 pid 不同 start_time 视为新进程，替换旧节点）。
+struct ProcNode {
+    unsigned int pid = 0;
+    unsigned int ppid = 0;
+    unsigned long long start_time = 0;  // 进程启动时间（ns，CLOCK_MONOTONIC 域）
+    char comm[16] = {0};
+    char exe[256] = {0};
+    bool exited = false;                 // tombstone 标记
+    unsigned long long exit_time_ms = 0; // 退出时间（steady ms），sweep 依据
+
+    std::string comm_str() const { return std::string(comm, strnlen(comm, sizeof(comm))); }
+    std::string exe_str() const { return std::string(exe, strnlen(exe, sizeof(exe))); }
+};
+
+// ── 进程树缓存 ────────────────────────────────────────────────────
+// 由消费线程单线程维护，无锁。启动时全量扫 /proc bootstrap；
+// fork 建节点、exec 更新 comm/exe（无此 pid 则就地补建）、exit 打
+// tombstone（60s 后周期 sweep 清除）；LRU 上限 100000 节点。
+class ProcessTree {
+public:
+    static constexpr size_t kMaxNodes = 100000;
+    static constexpr unsigned long long kTombstoneMs = 60000;  // 60s
+
+    ProcessTree() = default;
+
+    // 启动时全量扫 /proc 建立初始进程树（消费线程初始化时调用一次）
+    void bootstrap();
+
+    // 应用一条 fork/exec/exit 事件（消费线程调用，单线程无锁）
+    void apply(const proc_event& pe);
+
+    // 按 pid 查节点（供富化器沿祖先链上溯）；不存在返回 nullptr
+    const ProcNode* find(unsigned int pid) const;
+
+    // 清除超过 60s 的 tombstone（周期调用）
+    void sweep_tombstones();
+
+    size_t size() const { return nodes_.size(); }
+    size_t tombstone_count() const;
+
+private:
+    void upsert(ProcNode&& node);
+    void touch_lru(unsigned int pid);
+
+    std::unordered_map<unsigned int, ProcNode> nodes_;       // pid -> 节点（含 tombstone）
+    std::list<unsigned int> lru_;                            // front=最近使用
+    std::unordered_map<unsigned int, std::list<unsigned int>::iterator> lru_pos_;  // pid -> LRU 位置
+};

@@ -1,4 +1,7 @@
 #pragma once
+#include "baseline_db.hpp"
+
+
 #include <string>
 #include <vector>
 #include <ctime>
@@ -18,6 +21,9 @@ public:
     bool GenerateCheckHtml(const std::vector<CheckResult>& results,
                            const std::string& output_path);
     
+    bool GenerateMonitorEventsHtml(const std::vector<AlertRecord> &records,
+                               const std::string &output_path, const std::string &start,
+                               const std::string &end);
 private:
     std::string EscapeHtml(const std::string& raw);
     std::string GetCurrentTime();

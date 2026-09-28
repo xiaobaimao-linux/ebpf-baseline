@@ -35,7 +35,19 @@ rules:
       events:                   # 需要监控的事件列表
         - "read"                # 读取事件
         - "write"               # 写入事件
+        - "delete"              # 删除事件
       action: "block"           # 事件触发时的动作: alert / block
+
+  - id: "SYS-MONITOR-/tmp/fim_bench"
+    name: "监控敏感文件读取 - /tmp/fim_bench"
+    severity: "critical"
+    monitor:
+      path: "/tmp/fim_bench"       # 要监控的文件路径
+      events:                   # 需要监控的事件列表
+        - "read"                # 读取事件
+        - "write"               # 写入事件
+        - "delete"              # 删除事件
+      action: "report_only"           # 事件触发时的动作: alert / block
 
   # --- 示例规则 4: 同时包含 check 和 monitor 的规则 ---
   - id: "SYS-COMBO-001"
@@ -76,7 +88,7 @@ rules:
     #   on_failure: ""          # report_only / alert / block
     # monitor:                  # 用于实时监控 (可选)
     #   path: ""
-    #   events:                 # read / write (可同时存在)
+    #   events:                 # read / write / delete (可同时存在)
     #     - ""
     #   action: ""              # alert / block
 
@@ -90,3 +102,7 @@ alert:
 db:
   retention_days: 30
   retention_max_records: 10000
+
+# 遥测配置
+telemetry:
+  network: true   # 网络连接事件遥测（connect/accept/bind），默认关闭

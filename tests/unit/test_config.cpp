@@ -38,7 +38,7 @@ void test_file_permission_rule() {
 
     assert(config.rules.size() == 1);
     assert(config.rules[0].id == "SYS-PERM-001");
-    assert(config.rules[0].severity == "critical");
+    assert(config.rules[0].severity == SEVERITY_CRITICAL);
     assert(config.rules[0].check_types.size() == 1);
     assert(config.rules[0].check_types[0] == "file_permission");
     assert(config.rules[0].check_path == "/etc/passwd");
@@ -328,8 +328,8 @@ void test_severity_parsing() {
     Config config = parseYamlFile(path);
     cleanup(path);
 
-    assert(config.rules[0].severity == "low");
-    assert(config.rules[1].severity == "critical");
+    assert(config.rules[0].severity == SEVERITY_LOW);
+    assert(config.rules[1].severity == SEVERITY_CRITICAL);
     printf("  [PASS] CFG-013: 字符串severity解析\n");
 }
 

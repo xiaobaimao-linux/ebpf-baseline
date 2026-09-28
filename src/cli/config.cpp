@@ -59,6 +59,26 @@ string actionToString(Action action) {
     }
 }
 
+// 将 severity 字符串转为数值
+unsigned char stringToSeverity(const string& s) {
+    if (s == "low")      return SEVERITY_LOW;
+    if (s == "medium")   return SEVERITY_MEDIUM;
+    if (s == "high")     return SEVERITY_HIGH;
+    if (s == "critical") return SEVERITY_CRITICAL;
+    return SEVERITY_UNKNOWN;  // 未知等级
+}
+
+// 将 severity 数值转为字符串
+string severityToString(unsigned char sev) {
+    switch (sev) {
+    case SEVERITY_LOW:      return "low";
+    case SEVERITY_MEDIUM:   return "medium";
+    case SEVERITY_HIGH:     return "high";
+    case SEVERITY_CRITICAL: return "critical";
+    default:                return "unknown";
+    }
+}
+
 void compute_inodes(Config &config) {
     for (auto &rule : config.rules) {
         struct stat st;
@@ -136,6 +156,74 @@ Config parseYamlFile(const string &filename) {
             }
         }
 
+        // 解析 telemetry: 节点（遥测开关）
+        if (root["telemetry"]) {
+            const YAML::Node &telemetryNode = root["telemetry"];
+            if (telemetryNode["network"]) {
+                try {
+                    config.telemetry.network = telemetryNode["network"].as<bool>();
+                    spdlog::info("网络遥测: {}", config.telemetry.network ? "开启" : "关闭");
+                } catch (const YAML::Exception &e) {
+                    spdlog::warn("无法解析 telemetry.network 值: {}", e.what());
+                }
+            }
+            if (telemetryNode["dns"]) {
+                try {
+                    config.telemetry.dns = telemetryNode["dns"].as<bool>();
+                    spdlog::info("DNS 查询遥测: {}", config.telemetry.dns ? "开启" : "关闭");
+                } catch (const YAML::Exception &e) {
+                    spdlog::warn("无法解析 telemetry.dns 值: {}", e.what());
+                }
+            }
+            if (telemetryNode["privilege"]) {
+                try {
+                    config.telemetry.privilege = telemetryNode["privilege"].as<bool>();
+                    spdlog::info("权限事件遥测: {}", config.telemetry.privilege ? "开启" : "关闭");
+                } catch (const YAML::Exception &e) {
+                    spdlog::warn("无法解析 telemetry.privilege 值: {}", e.what());
+                }
+            }
+            if (telemetryNode["store"]) {
+                try {
+                    config.telemetry.store = telemetryNode["store"].as<bool>();
+                    spdlog::info("遥测落库: {}", config.telemetry.store ? "开启" : "关闭");
+                } catch (const YAML::Exception &e) {
+                    spdlog::warn("无法解析 telemetry.store 值: {}", e.what());
+                }
+            }
+            if (telemetryNode["events_db"]) {
+                config.telemetry.events_db = telemetryNode["events_db"].as<string>();
+            }
+            if (telemetryNode["queue_hi"]) {
+                try {
+                    config.telemetry.queue_hi = telemetryNode["queue_hi"].as<int>();
+                } catch (const YAML::Exception &e) {
+                    spdlog::warn("无法解析 telemetry.queue_hi 值: {}", e.what());
+                }
+            }
+            if (telemetryNode["queue_lo"]) {
+                try {
+                    config.telemetry.queue_lo = telemetryNode["queue_lo"].as<int>();
+                } catch (const YAML::Exception &e) {
+                    spdlog::warn("无法解析 telemetry.queue_lo 值: {}", e.what());
+                }
+            }
+            if (telemetryNode["batch_size"]) {
+                try {
+                    config.telemetry.batch_size = telemetryNode["batch_size"].as<int>();
+                } catch (const YAML::Exception &e) {
+                    spdlog::warn("无法解析 telemetry.batch_size 值: {}", e.what());
+                }
+            }
+            if (telemetryNode["batch_ms"]) {
+                try {
+                    config.telemetry.batch_ms = telemetryNode["batch_ms"].as<int>();
+                } catch (const YAML::Exception &e) {
+                    spdlog::warn("无法解析 telemetry.batch_ms 值: {}", e.what());
+                }
+            }
+        }
+
         if (!root["rules"]) {
             spdlog::error("YAML 文件缺少 'rules' 根节点: {}", filename);
             return config;
@@ -143,10 +231,18 @@ Config parseYamlFile(const string &filename) {
 
         const YAML::Node &rulesNode = root["rules"];
         for (const auto &item : rulesNode) {
+            try {
             Rule rule;
 
             rule.id = item["id"] ? item["id"].as<string>() : "";
-            rule.severity = item["severity"] ? item["severity"].as<string>() : "";
+            if (item["severity"]) {
+                rule.severity = stringToSeverity(item["severity"].as<string>());
+                // 未知字符串回退到 MEDIUM
+                if (rule.severity == SEVERITY_UNKNOWN) {
+                    rule.severity = SEVERITY_MEDIUM;
+                }
+            }
+            // 否则保持默认值 SEVERITY_MEDIUM
             string name = item["name"] ? item["name"].as<string>() : "";
             if (!rule.id.empty() && !name.empty()) {
                 rule.name = rule.id + ": " + name;
@@ -228,6 +324,15 @@ Config parseYamlFile(const string &filename) {
                             if (evt == "write") {
                                 rule.monitor_write = true;
                             }
+                            if (evt == "delete") {
+                                rule.monitor_delete = true;
+                            }
+                            if (evt == "chmod") {
+                                rule.monitor_chmod = true;
+                            }
+                            if (evt == "chown") {
+                                rule.monitor_chown = true;
+                            }
                         }
                     }
                 }
@@ -247,6 +352,10 @@ Config parseYamlFile(const string &filename) {
                           rule.check_on_failure.empty() ? "(无)" : rule.check_on_failure,
                           rule.monitor_path.empty() ? "(无)" : rule.monitor_path,
                           rule.monitor_events.empty() ? "(无)" : "set");
+            } catch (const YAML::Exception &e) {
+                string rule_id = item["id"] ? item["id"].as<string>() : "(unknown)";
+                spdlog::warn("规则 {} 解析失败，已跳过: {}", rule_id, e.what());
+            }
         }
 
         config.rules = rules;

@@ -293,8 +293,10 @@ bool AlertManager::SendDingTalk(const AlertEvent& event) {
         spdlog::debug("DingTalk not enabled, skip webhook but persist to DB");
     }
 
-    // 4. 统一落库（无论钉钉是否发送成功/被节流，都记录到 SQLite）
-    SaveAlertToDB(event, dingtalk_sent);
+    // 4. 落库：未节流时记录；节流窗口内跳过（首条已入库，防止事件风暴刷爆库）
+    if (!throttled) {
+        SaveAlertToDB(event, dingtalk_sent);
+    }
 
     return dingtalk_sent;
 }

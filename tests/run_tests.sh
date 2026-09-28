@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # 清理并编译
-rm -f test_config test_utils
+rm -f test_config test_utils test_watermark test_event_bus
 make unit 2>&1
 
 # 运行单元测试
@@ -15,6 +15,12 @@ echo "test_config exit: $?" >> /tmp/test_results.txt
 
 ./test_utils >> /tmp/test_results.txt 2>&1
 echo "test_utils exit: $?" >> /tmp/test_results.txt
+
+./test_watermark >> /tmp/test_results.txt 2>&1
+echo "test_watermark exit: $?" >> /tmp/test_results.txt
+
+./test_event_bus >> /tmp/test_results.txt 2>&1
+echo "test_event_bus exit: $?" >> /tmp/test_results.txt
 
 # 运行集成测试
 echo "" >> /tmp/test_results.txt

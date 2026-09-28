@@ -17,7 +17,7 @@ enum class Action {
 
 struct Rule {
     std::string id;
-    std::string severity;
+    unsigned char severity = SEVERITY_MEDIUM;  // SEVERITY_LOW(0) ~ SEVERITY_CRITICAL(3)
     std::string name;
 
     unsigned long ino = 0;
@@ -41,5 +41,8 @@ struct Rule {
     Action monitor_action = Action::UNKNOWN;
     bool monitor_read = false;
     bool monitor_write = false;
+    bool monitor_delete = false;
+    bool monitor_chmod = false;
+    bool monitor_chown = false;
 };
 

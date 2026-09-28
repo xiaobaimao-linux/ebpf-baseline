@@ -1,17 +1,65 @@
 #pragma once
+
+#include <cstdint>
 #include <sqlite3.h>
 #include <string>
 #include <vector>
-#include <stdexcept>
-#include <iostream>
 
 struct BaselineRecord {
     std::string file_path;
     std::string hash;           // sha256
     std::string permission;     // 如 "0644"
     std::string owner;          // uid或用户名
-    std::string grp;          // gid或组名
+    std::string grp;            // gid或组名
     std::string recorded_at;    // ISO 8601时间
+};
+
+struct SnapshotEntry {
+    std::string file_path;
+    std::string file_type = "regular";
+    std::string hash;
+    std::string permission;
+    std::int64_t uid = 0;
+    std::int64_t gid = 0;
+    std::string owner;
+    std::string grp;
+    std::int64_t file_size = 0;
+    std::int64_t mtime = 0;
+};
+
+// list 子命令使用的扩展条目（含快照元信息）
+struct ListEntry : SnapshotEntry {
+    std::string snapshot_id;
+    std::string label;
+    std::string recorded_at;
+};
+
+// check / clean 子命令使用的完整条目（含快照元信息）
+struct CheckEntry : SnapshotEntry {
+    std::string snapshot_id;
+    std::string label;
+    std::string recorded_at;
+};
+
+// list 查询结果：entries 为当前页数据，total_count 为过滤后总行数
+struct ListResult {
+    std::vector<ListEntry> entries;
+    std::int64_t total_count = 0;
+};
+
+struct SnapshotScope {
+    std::string path;
+    bool recursive = true;
+    bool exact_file = false;
+};
+
+struct SnapshotStats {
+    std::int64_t scanned = 0;
+    std::int64_t added = 0;
+    std::int64_t modified = 0;
+    std::int64_t removed = 0;
+    std::int64_t unchanged = 0;
+    std::int64_t errors = 0;
 };
 
 // 告警记录结构体
@@ -41,8 +89,26 @@ public:
     // 设置 SQLite WAL 日志模式
     void setWAL();
 
-    // 保存或更新基线
+    // 保存或更新旧版 check 观察记录
     void SaveBaseline(const BaselineRecord& record);
+
+    // 原子应用一次文件基线快照
+    bool ApplySnapshot(const std::string& snapshot_id,
+                      const std::string& label,
+                      const std::vector<SnapshotEntry>& entries,
+                      const std::vector<SnapshotScope>& scopes,
+                      const std::vector<std::string>& excludes,
+                      bool recursive,
+                      const std::string& roots_text,
+                      const std::string& excludes_text,
+                      const std::string& started_at,
+                      const std::string& finished_at,
+                      SnapshotStats& stats,
+                      std::string& error);
+
+    // 快照当前基线和审计记录查询，供测试及后续历史命令使用
+    std::vector<SnapshotEntry> GetSnapshotEntries();
+    int GetBaselineAuditCount();
 
     // 保存告警记录
     void SaveAlert(const AlertRecord& record);
@@ -75,49 +141,26 @@ public:
     std::vector<AlertRecord> GetMonitorEvents(const std::string& start = "",
                                                const std::string& end = "");
 
+    // 删除基线条目：paths 中的每个路径精确匹配；recursive=true 时目录路径启用前缀匹配
+    // source_label 用于审计记录的来源标识
+    // 返回实际删除的条目数
+    int DeleteBaselineEntries(const std::vector<std::string>& paths, bool recursive,
+                              const std::string& source_label = "manual-delete");
+
+    // 分页查询 baseline_entries：path_filter 使用 SQL LIKE 语法，limit/offset 控制分页
+    // 返回 entries（当前页）和 total_count（过滤后总行数）
+    ListResult ListBaselineEntries(const std::string& path_filter,
+                                   int limit,
+                                   int offset);
+
+    // 获取全部基线条目（含快照元信息），用于 check / clean 子命令
+    std::vector<CheckEntry> GetAllBaselineEntries();
+
+    // 查询单条基线条目（按 file_path 精确匹配 baseline_entries 表），不存在时返回 false
+    bool GetBaselineEntry(const std::string& file_path, CheckEntry& out);
+
 private:
     sqlite3* db_ = nullptr;
 
-    void InitTable() {
-        // 基线表
-        const char* sql_baselines = R"(
-            CREATE TABLE IF NOT EXISTS baselines (
-                file_path   TEXT PRIMARY KEY,
-                hash        TEXT,
-                permission  TEXT,
-                owner       TEXT,
-                grp         TEXT,
-                recorded_at TEXT
-            );
-        )";
-        sqlite3_exec(db_, sql_baselines, nullptr, nullptr, nullptr);
-
-        // 告警记录表
-        const char* sql_alerts = R"(
-            CREATE TABLE IF NOT EXISTS alerts (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_id     TEXT NOT NULL,
-                rule_name   TEXT,
-                severity    TEXT,
-                file_path   TEXT NOT NULL,
-                event_type  TEXT,
-                process_name TEXT,
-                pid         INTEGER,
-                user_name   TEXT,
-                uid         TEXT,
-                expected    TEXT,
-                actual      TEXT,
-                action_taken TEXT,
-                dingtalk_sent INTEGER DEFAULT 0,
-                recorded_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_alerts_rule_id ON alerts(rule_id);
-            CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts(recorded_at);
-        )";
-        sqlite3_exec(db_, sql_alerts, nullptr, nullptr, nullptr);
-
-        // 兼容旧版 alerts 表：如果已有旧库文件，则补齐新字段
-        sqlite3_exec(db_, "ALTER TABLE alerts ADD COLUMN user_name TEXT DEFAULT '';", nullptr, nullptr, nullptr);
-        sqlite3_exec(db_, "ALTER TABLE alerts ADD COLUMN uid TEXT DEFAULT '';", nullptr, nullptr, nullptr);
-    }
+    void InitTable();
 };

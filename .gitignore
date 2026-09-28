@@ -1,2 +1,40 @@
+
+bpf/lsm_filename.c
+bpf/test_filename_lookup
+bpf/test_filename_lookup.c
+bpf/bpf_common.h
+
+
+# 编译中间文件
 *.o
+*.d
+*.db
+
+# 测试/调试产物
+dump.txt
 baseline-guard
+req/
+back/
+
+# BPF 自动生成的头文件
+bpf/*.skel.h
+
+# 测试二进制文件
+bpf/test_filename_lookup
+tests/test_config
+tests/test_utils
+tests/unit/test_watermark
+tests/unit/test_config
+tests/integration/helpers/pipe_flood
+tests/test_event_bus
+
+# SQLite 运行期文件与测试备份
+*-shm
+*-wal
+*.db.bak*
+
+# tests 下编译出的测试二进制（与 tests/Makefile 目标同名）
+/tests/test_config
+/tests/test_utils
+/tests/test_watermark
+/tests/test_event_bus

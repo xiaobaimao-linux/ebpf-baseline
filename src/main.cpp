@@ -1,5 +1,10 @@
 #include "alert_manager.hpp"
 #include "baseline.hpp"
+#include "baseline_check.hpp"
+#include "baseline_clean.hpp"
+#include "baseline_delete.hpp"
+#include "baseline_list.hpp"
+#include "baseline_snapshot.hpp"
 #include "baseline_db.hpp"
 #include "check.hpp"
 #include "commonfun.hpp"
@@ -7,6 +12,9 @@
 #include "logger.h"
 #include "monitor.hpp"
 #include "utils.hpp"
+#include "report_generator.hpp"
+#include "stats.hpp"
+
 
 #include "spdlog/spdlog.h"
 #include <algorithm>
@@ -56,19 +64,7 @@ void PrintReportUsage() {
     printf("  baseline-guard report --start 2026-08-01 --end 2026-08-10 -o events.html\n");
 }
 
-std::string NormalizeTimestamp(const std::string &timestamp) {
-    if (timestamp.size() >= 19 && timestamp[4] == '-' && timestamp[7] == '-') {
-        return timestamp;
-    }
 
-    if (timestamp.size() >= 17 && timestamp[8] == '-') {
-        return timestamp.substr(0, 4) + "-" + timestamp.substr(4, 2) + "-" +
-               timestamp.substr(6, 2) + " " + timestamp.substr(9, 2) + ":" +
-               timestamp.substr(12, 2) + ":" + timestamp.substr(15, 2);
-    }
-
-    return timestamp;
-}
 
 std::string EscapeHtml(const std::string &raw) {
     std::string out;
@@ -93,13 +89,7 @@ std::string EscapeHtml(const std::string &raw) {
     return out;
 }
 
-std::string GetCurrentTimeForHtml() {
-    auto t = std::time(nullptr);
-    auto tm = *std::localtime(&t);
-    std::stringstream ss;
-    ss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
-    return ss.str();
-}
+
 
 bool NormalizeReportTime(const std::string &value, bool end_of_day, std::string &normalized) {
     std::string input = value;
@@ -142,117 +132,6 @@ bool NormalizeReportTime(const std::string &value, bool end_of_day, std::string 
     return true;
 }
 
-std::string SeverityClass(const std::string &severity) {
-    if (severity == "critical" || severity == "high" || severity == "medium" || severity == "low") {
-        return "severity-" + severity;
-    }
-    return "";
-}
-
-// 生成 monitor 原始事件 HTML 报告
-bool GenerateMonitorEventsHtml(const std::vector<AlertRecord> &records,
-                               const std::string &output_path, const std::string &start,
-                               const std::string &end) {
-    const int total = static_cast<int>(records.size());
-
-    std::ofstream fs(output_path);
-    if (!fs.is_open()) {
-        return false;
-    }
-
-    fs << R"(<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>baseline-guard monitor 事件报告</title>
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;max-width:1400px;margin:40px auto;padding:0 20px;color:#333}
-h1{color:#1a1a1a;border-bottom:2px solid #dc3545;padding-bottom:10px}
-.summary{display:flex;gap:20px;margin:20px 0}
-.summary-box{padding:20px 40px;border-radius:8px;text-align:center;background:#f6f8fa}
-table{width:100%;border-collapse:collapse;margin:20px 0;font-size:13px}
-th{background:#f6f8fa;padding:12px;text-align:left;border-bottom:2px solid #dfe2e5;font-weight:600;white-space:nowrap}
-td{padding:10px 12px;border-bottom:1px solid #eaecef}
-tr:hover{background:#f6f8fa}
-.severity-critical{color:#dc3545;font-weight:bold}
-.severity-high{color:#fd7e14;font-weight:bold}
-.severity-medium{color:#b8860b}
-.severity-low{color:#6c757d}
-.footer{margin-top:40px;padding-top:20px;border-top:1px solid #eaecef;color:#666;font-size:12px;text-align:center}
-</style>
-</head>
-<body>
-<h1>baseline-guard monitor 事件报告</h1>
-<p>生成时间：)"
-       << GetCurrentTimeForHtml() << R"(</p>
-<p>主机：)"
-       << EscapeHtml(GetHostname()) << R"(</p>
-<p>筛选范围：)"
-       << EscapeHtml(start.empty() ? "不限" : start) << " — "
-       << EscapeHtml(end.empty() ? "不限" : end) << R"(</p>
-
-<div class="summary">
-<div class="summary-box"><h2>)"
-       << total << R"(</h2><p>事件总数</p></div>
-</div>
-
-<table>
-<thead>
-<tr>
-<th>时间</th>
-<th>规则ID</th>
-<th>规则名称</th>
-<th>严重级别</th>
-<th>文件路径</th>
-<th>事件类型</th>
-<th>进程/PID</th>
-<th>用户/UID</th>
-<th>预期→实际</th>
-<th>动作</th>
-</tr>
-</thead>
-<tbody>
-)";
-
-    for (const auto &r : records) {
-        const std::string timestamp = NormalizeTimestamp(r.recorded_at);
-        const std::string sev_class = SeverityClass(r.severity);
-        const std::string details = r.expected.empty() || r.actual.empty()
-                                        ? "-"
-                                        : (EscapeHtml(r.expected) + " → " + EscapeHtml(r.actual));
-        const std::string process = (r.process_name.empty() ? "-" : EscapeHtml(r.process_name)) +
-                                    " (pid=" + (r.pid > 0 ? std::to_string(r.pid) : "-") + ")";
-        const std::string user = EscapeHtml(r.user_name.empty() ? "-" : r.user_name) +
-                                 " (uid=" + EscapeHtml(r.uid.empty() ? "-" : r.uid) + ")";
-
-        fs << "<tr>\n";
-        fs << "<td>" << EscapeHtml(timestamp) << "</td>\n";
-        fs << "<td><code>" << EscapeHtml(r.rule_id) << "</code></td>\n";
-        fs << "<td>" << EscapeHtml(r.rule_name.empty() ? "-" : r.rule_name) << "</td>\n";
-        fs << "<td class=\"" << sev_class << "\">" << EscapeHtml(r.severity) << "</td>\n";
-        fs << "<td><code>" << EscapeHtml(r.file_path) << "</code></td>\n";
-        fs << "<td>" << EscapeHtml(r.event_type.empty() ? "-" : r.event_type) << "</td>\n";
-        fs << "<td>" << process << "</td>\n";
-        fs << "<td>" << user << "</td>\n";
-        fs << "<td>" << details << "</td>\n";
-        fs << "<td>" << EscapeHtml(r.action_taken.empty() ? "-" : r.action_taken) << "</td>\n";
-        fs << "</tr>\n";
-    }
-
-    fs << R"(</tbody>
-</table>
-
-<div class="footer">
-<p>由 baseline-guard 自动生成 | https://github.com/xiaobaimao-linux/ebpf-baseline</p>
-</div>
-
-</body>
-</html>
-)";
-
-    fs.close();
-    return true;
-}
 
 void PrintAlerts(const std::vector<AlertRecord> &records) {
     if (records.empty()) {
@@ -294,11 +173,45 @@ void PrintAlerts(const std::vector<AlertRecord> &records) {
 } // namespace
 
 int main(int argc, char *argv[]) {
+    // baseline snapshot / delete / list / check / clean 使用独立参数解析，并在解析 --db 后再初始化数据库。
+    if (argc >= 2 && std::string(argv[1]) == "baseline") {
+        if (argc < 3) {
+            fprintf(stderr, "Error: baseline subcommand required (snapshot, delete, list, check, clean)\n");
+            return 2;
+        }
+        std::string subcmd = argv[2];
+        if (subcmd == "snapshot") {
+            return RunBaselineSnapshot(argc - 3, argv + 3);
+        } else if (subcmd == "delete") {
+            return RunBaselineDelete(argc - 3, argv + 3);
+        } else if (subcmd == "list") {
+            return RunBaselineList(argc - 3, argv + 3);
+        } else if (subcmd == "check") {
+            return RunBaselineCheck(argc - 3, argv + 3);
+        } else if (subcmd == "clean") {
+            return RunBaselineClean(argc - 3, argv + 3);
+        } else {
+            fprintf(stderr, "Error: unknown baseline subcommand: %s\n", subcmd.c_str());
+            return 2;
+        }
+    }
+
+    // stats 子命令：读取 eBPF map 统计信息（独立于 config/DB）
+    if (argc >= 2 && std::string(argv[1]) == "stats") {
+        return RunStats(argc - 2, argv + 2);
+    }
+
     // 设置全局日志级别（默认是 info，低于它的 debug/trace 不会输出）
     spdlog::set_level(spdlog::level::debug);
 
-    // 2. 初始化数据库
-    BaselineDB db;
+    // 2. 延迟初始化数据库（仅在需要时创建）
+    BaselineDB* db_ptr = nullptr;
+    auto get_db = [&db_ptr]() -> BaselineDB& {
+        if (!db_ptr) {
+            db_ptr = new BaselineDB();
+        }
+        return *db_ptr;
+    };
 
     std::string config_path;
     std::string cmd;
@@ -323,8 +236,14 @@ int main(int argc, char *argv[]) {
             printf("Commands:\n");
             printf("  --check               check baseline\n");
             printf("  --monitor             monitor baseline\n");
+            printf("  baseline snapshot     create or update file baselines\n");
+            printf("  baseline delete       delete file baseline entries\n");
+            printf("  baseline list         list file baseline entries\n");
+            printf("  baseline check        check baseline integrity against disk\n");
+            printf("  baseline clean        clean orphan baseline entries\n");
             printf("  alerts                show alert history from SQLite\n");
             printf("  report                export monitor events to HTML\n");
+            printf("  stats --drop          show eBPF ring buffer drop statistics\n");
             return 0;
         } else if (arg == "-C" || arg == "--check") {
             cmd = "check";
@@ -388,8 +307,9 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
 
-            const auto events = db.GetMonitorEvents(start, end);
-            if (!GenerateMonitorEventsHtml(events, output_path, start, end)) {
+            const auto events = get_db().GetMonitorEvents(start, end);
+            ReportGenerator rg;
+            if (!rg.GenerateMonitorEventsHtml(events, output_path, start, end)) {
                 fprintf(stderr, "Error: failed to generate HTML report: %s\n", output_path.c_str());
                 return 1;
             }
@@ -455,9 +375,105 @@ int main(int argc, char *argv[]) {
                 ++j;
             }
 
-            const auto alerts = db.GetAlerts(rule, limit, today);
+            const auto alerts = get_db().GetAlerts(rule, limit, today);
             PrintAlerts(alerts);
             return 0;
+        } else if (arg == "monitor") {
+            // 解析 monitor 子命令的参数
+            std::string monitor_db_path;
+            bool skip_boot_check = false;
+            int j = i + 1;
+            while (j < argc) {
+                std::string subarg = argv[j];
+                if (subarg == "--db") {
+                    if (j + 1 >= argc) {
+                        fprintf(stderr, "Error: missing value for --db\n");
+                        return 1;
+                    }
+                    monitor_db_path = argv[++j];
+                } else if (subarg.rfind("--db=", 0) == 0) {
+                    monitor_db_path = subarg.substr(5);
+                } else if (subarg == "-c" || subarg == "--config") {
+                    if (j + 1 >= argc) {
+                        fprintf(stderr, "Error: missing value for -c\n");
+                        return 1;
+                    }
+                    config_path = argv[++j];
+                } else if (subarg.rfind("--config=", 0) == 0) {
+                    config_path = subarg.substr(std::string("--config=").size());
+                } else if (subarg == "--skip-boot-baseline-check") {
+                    skip_boot_check = true;
+                } else if (subarg == "-h" || subarg == "--help") {
+                    printf("Usage: baseline-guard monitor [options]\n");
+                    printf("Options:\n");
+                    printf("  --db PATH    SQLite baseline DB path (enables baseline comparison)\n");
+                    printf("  --skip-boot-baseline-check   skip full baseline check at startup\n");
+                    printf("  -c PATH      YAML config file (optional when --db is used)\n");
+                    printf("  -h, --help   display this message\n");
+                    return 0;
+                } else {
+                    fprintf(stderr, "Error: unknown monitor option: %s\n", subarg.c_str());
+                    return 1;
+                }
+                ++j;
+            }
+
+            if (monitor_db_path.empty()) {
+                // 无 --db: 走原有 YAML 监控流程（需要 -c config）
+                cmd = "monitor";
+            } else {
+                // 有 --db: 先检查数据库文件是否存在，避免启动后才报错
+                if (access(monitor_db_path.c_str(), R_OK) != 0) {
+                    fprintf(stderr, "Error: baseline DB not found or not readable: %s\n",
+                            monitor_db_path.c_str());
+                    return 1;
+                }
+
+                // 直接执行基线实时监控
+                Logger::init("/var/log/baseline-guard");
+                spdlog::info("[service_start] baseline-guard monitor --db {} starting, pid={}",
+                             monitor_db_path, getpid());
+
+                Config config;
+                if (!config_path.empty()) {
+                    if (!ends_with(config_path, ".yaml") && !ends_with(config_path, ".yml")) {
+                        spdlog::error("[config_error] only yaml/yml config is supported now: {}", config_path);
+                        return 1;
+                    }
+                    config = parseYamlFile(config_path);
+                    compute_inodes(config);
+                    spdlog::info("[rules_loaded] config={}, rules={}", config_path, config.rules.size());
+                }
+
+                AlertManager alert_mgr;
+                if (!config_path.empty()) {
+                    alert_mgr.LoadConfig(config.alert, config.db);
+                }
+                BaselineDB alert_db;  // 使用默认路径
+                alert_mgr.SetDB(&alert_db);
+
+                if (alert_mgr.IsEnabled()) {
+                    spdlog::info("DingTalk alert enabled, throttle={}s", config.alert.throttle_seconds);
+                }
+
+                signal(SIGHUP, sighup_handler);
+                int ret = 0;
+                while (true) {
+                    ret = do_monitor(config, alert_mgr, monitor_db_path, skip_boot_check);
+                    if (!g_reload) {
+                        break;
+                    }
+                    g_reload = false;
+                    if (!config_path.empty()) {
+                        spdlog::info("[rules_reload] SIGHUP received, reloading config from {}", config_path);
+                        config = parseYamlFile(config_path);
+                        compute_inodes(config);
+                        spdlog::info("[rules_reload] config reloaded, rules={}", config.rules.size());
+                    }
+                }
+                spdlog::info("[service_stop] monitor mode stopped, exit_code={}", ret);
+                return ret;
+            }
         } else if (cmd.empty()) {
             cmd = arg;
         } else {
@@ -498,7 +514,7 @@ int main(int argc, char *argv[]) {
 
     AlertManager alert_mgr;
     alert_mgr.LoadConfig(config.alert, config.db);
-    alert_mgr.SetDB(&db);
+    alert_mgr.SetDB(&get_db());
 
     if (alert_mgr.IsEnabled()) {
         spdlog::info("DingTalk alert enabled, throttle={}s", config.alert.throttle_seconds);
@@ -512,7 +528,7 @@ int main(int argc, char *argv[]) {
 
     if (cmd == "check") {
         spdlog::info("[service_start] check mode started");
-        int ret = do_check(config, db);
+        int ret = do_check(config, get_db());
         spdlog::info("[service_stop] check mode finished, exit_code={}", ret);
         return ret;
     } else if (cmd == "monitor") {
