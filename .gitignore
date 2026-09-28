@@ -1,8 +1,6 @@
 
-bpf/lsm_filename.c
 bpf/test_filename_lookup
 bpf/test_filename_lookup.c
-bpf/bpf_common.h
 
 
 # 编译中间文件
