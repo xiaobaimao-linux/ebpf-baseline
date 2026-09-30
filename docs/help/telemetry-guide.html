@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>运行时遥测手册 · 谛听（Diting）</title>
+<style>
+  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;max-width:880px;margin:40px auto;padding:0 20px;color:#24292f;line-height:1.7}
+  h1{border-bottom:2px solid #1f6feb;padding-bottom:10px}
+  h2{margin-top:36px;border-bottom:1px solid #d0d7de;padding-bottom:6px}
+  table{border-collapse:collapse;width:100%;margin:12px 0}
+  th,td{border:1px solid #d0d7de;padding:7px 12px;text-align:left;font-size:.92rem}
+  th{background:#f6f8fa}
+  pre{background:#0d1117;color:#c9d1d9;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:.88rem}
+  code{background:#eff1f3;border-radius:4px;padding:1px 5px;font-size:.9em}
+  pre code{background:none;padding:0}
+  blockquote{border-left:4px solid #d0d7de;margin:12px 0;padding:4px 16px;color:#57606a;background:#f6f8fa}
+  .warn{border-left-color:#d4a72c;background:#fff8c5}
+  .nav{margin-bottom:24px}
+  .nav a{color:#1f6feb;text-decoration:none}
+</style>
+</head>
+<body>
+<p class="nav"><a href="index.html">← 返回帮助中心</a></p>
+<h1>运行时遥测手册</h1>
+<p>谛听的遥测层通过 eBPF 采集主机运行时行为：网络连接、DNS 查询、权限敏感操作、命名空间行为。所有事件携带<strong>进程归属（pid/ppid/uid/comm/exe）与容器 ID</strong>，以结构化 JSON 输出，是威胁检测与告警富化的数据底座。</p>
+
+<h2>1. 开启方式</h2>
+<p>遥测默认全部关闭（关闭时探针不加载，对既有功能零影响）。编辑 <code>baselines/default.yaml</code>：</p>
+<pre><code>telemetry:
+  network: true    # 网络连接事件 connect/accept/bind + 五元组
+  dns: true        # DNS 查询事件（UDP 53，提取查询域名）
+  privilege: true  # 权限与命名空间事件</code></pre>
+<pre><code>sudo ./baseline-guard monitor -c baselines/default.yaml</code></pre>
+
+<h2>2. 采集点一览</h2>
+<table>
+<tr><th>事件类型</th><th>eBPF 挂点</th><th>采集内容</th></tr>
+<tr><td>network.connect</td><td>kprobe tcp_v4_connect</td><td>五元组（已知限制：入口源端口未分配，sport=0）</td></tr>
+<tr><td>network.accept</td><td>kretprobe inet_csk_accept</td><td>完整五元组</td></tr>
+<tr><td>network.bind</td><td>tracepoint sys_enter_bind</td><td>监听地址/端口</td></tr>
+<tr><td>network.dns</td><td>tracepoint sys_enter_sendto</td><td>查询域名 + qtype（仅 UDP 53）</td></tr>
+<tr><td>priv.setuid / priv.setgid</td><td>tracepoint sys_enter_setuid 系</td><td>目标 uid/gid</td></tr>
+<tr><td>priv.capset</td><td>tracepoint sys_enter_capset</td><td>effective 掩码（尽力解析）</td></tr>
+<tr><td>priv.ptrace</td><td>tracepoint sys_enter_ptrace</td><td>request 类型 + 目标 pid</td></tr>
+<tr><td>priv.module_load</td><td>tracepoint module:module_load</td><td>模块名</td></tr>
+<tr><td>ns.mount</td><td>tracepoint sys_enter_mount</td><td>源路径/目标路径/fstype/flags</td></tr>
+<tr><td>ns.unshare</td><td>tracepoint sys_enter_unshare</td><td>namespace 类型（flags 解码）</td></tr>
+<tr><td>ns.setns</td><td>tracepoint sys_enter_setns</td><td>fd + nstype，目标 ns 尽力解析</td></tr>
+</table>
+<p>容器归属：用户态解析 <code>/proc/&lt;pid&gt;/cgroup</code>，支持 docker / containerd / CRI-O，输出 12 位短 ID；宿主机进程不带 container 字段。</p>
+
+<h2>3. 事件格式</h2>
+<pre><code>{"event_type":"network.connect",
+ "network":{"dip":"104.20.23.154","dport":80,"family":2,"protocol":6,"sip":"0.0.0.0","sport":0},
+ "process":{"comm":"curl","exe":"/usr/bin/curl","gid":1000,"pid":7722,"ppid":7713,"uid":1000},
+ "ts":994815000579}</code></pre>
+<p>通用字段：<code>event_type</code>（类型）、<code>ts</code>（纳秒时间戳）、<code>process</code>（pid/ppid/uid/gid/comm/exe）、<code>container.container_id</code>（容器进程才有）。负载字段按类型分别为 <code>network</code> / <code>dns</code> / <code>priv</code> / <code>ns</code>。</p>
+
+<h2>4. 触发验证命令</h2>
+<pre><code>curl -s http://example.com -o /dev/null        # network.connect（dport=80）
+nc -lvnp 4567 & echo hi | nc 127.0.0.1 4567    # bind + connect + accept 三件套
+dig example.com                                 # network.dns（domain=example.com）
+sudo -u nobody id                               # priv.setuid（target_id=65534）
+sudo modprobe dummy && sudo rmmod dummy         # priv.module_load（name=dummy）
+sudo mount -t tmpfs none /tmp/mnt && sudo umount /tmp/mnt   # ns.mount
+unshare -m true                                 # ns.unshare（flags 含 NEWNS）</code></pre>
+<p>自动化验收脚本（逐项 PASS/FAIL，可重复执行）：</p>
+<pre><code>sudo bash tests/integration/test_net_collection.sh        # 网络三件套 + 容器归属
+sudo bash tests/integration/test_dns_priv_collection.sh   # DNS + 权限四类
+sudo bash tests/integration/test_ns_collection.sh         # 命名空间三类</code></pre>
+
+<h2>5. 已知限制</h2>
+<blockquote class="warn">
+<ul>
+<li>connect 事件入口时源端口尚未分配，<code>sip/sport</code> 为 0（后续 inet_sock_set_state 补强）；</li>
+<li>DNS 仅采 UDP 53；TCP 53（大响应/域传送）不采；sendmsg 路径尽力支持；</li>
+<li>capset 掩码解析尽力而为，失败时事件仍落（掩码字段为未知标记）；</li>
+<li>短寿进程容器归属可能省略（/proc 已消失，属正常场景）；</li>
+<li>遥测落库（事件总线 + SQLite 批量写 + 进程树富化）开发中，当前输出为 JSON 日志。</li>
+</ul>
+</blockquote>
+
+<h2>6. 内核兼容性</h2>
+<p>推荐内核 <strong>5.10+ / 6.x</strong>（BTF + ring buffer + BPF LSM 全原生支持）。4.18（RHEL8）/ 5.4（Ubuntu 20.04）各采集点的红黄绿结论与降级路径，见 <a href="../kernel-compat-matrix.md">采集点内核兼容矩阵</a>。</p>
+
+<p class="nav"><a href="index.html">← 返回帮助中心</a> · <a href="fim-guide.html">FIM 使用手册 →</a></p>
+</body>
+</html>

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>谛听（Diting）帮助中心</title>
+<style>
+  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;max-width:880px;margin:40px auto;padding:0 20px;color:#24292f;line-height:1.7}
+  h1{border-bottom:2px solid #1f6feb;padding-bottom:10px}
+  .card{display:block;border:1px solid #d0d7de;border-radius:10px;padding:18px 22px;margin:14px 0;text-decoration:none;color:inherit;transition:border-color .15s}
+  .card:hover{border-color:#1f6feb}
+  .card h2{margin:0 0 6px;font-size:1.15rem;color:#1f6feb}
+  .card p{margin:0;color:#57606a}
+  .tag{display:inline-block;background:#ddf4e4;color:#116329;border-radius:12px;padding:1px 10px;font-size:.8rem;margin-left:8px}
+  .tag.dev{background:#fff8c5;color:#7d4e00}
+  footer{margin-top:36px;color:#57606a;font-size:.85rem;border-top:1px solid #d0d7de;padding-top:12px}
+</style>
+</head>
+<body>
+<h1>谛听（Diting）帮助中心</h1>
+<p>基于 eBPF 的 Linux 主机安全监控 Agent：内核级文件完整性监控（FIM）+ 全量运行时遥测。选择你要查阅的手册：</p>
+
+<a class="card" href="fim-guide.html">
+  <h2>文件完整性监控（FIM）使用手册 <span class="tag">v0.3 已冻结</span></h2>
+  <p>基线快照 snapshot / list / delete / check / clean 全参数 · monitor 双模式 · 三类告警隔离 · 钉钉推送 · HTML 审计报表 · 核心判定规则</p>
+</a>
+
+<a class="card" href="telemetry-guide.html">
+  <h2>运行时遥测手册 <span class="tag">已入库</span></h2>
+  <p>telemetry 开关 · 网络/DNS/权限/命名空间 11 个采集点 · 事件 JSON 字段说明 · 容器归属 · 触发验证命令 · 已知限制</p>
+</a>
+
+<a class="card" href="../kernel-compat-matrix.md">
+  <h2>采集点内核兼容矩阵</h2>
+  <p>4.18 / 5.4 / 5.10 / 6.x 四档内核红黄绿标注与降级路径（Markdown 文档）</p>
+</a>
+
+<a class="card" href="../ring_buffer_optimization.md">
+  <h2>ring buffer 水位背压优化</h2>
+  <p>高负载下事件通道的水位分级与背压设计（Markdown 文档）</p>
+</a>
+
+<footer>谛听（Diting）· BSL 1.1 授权 · 商业授权咨询 kabc005009@163.com</footer>
+</body>
+</html>

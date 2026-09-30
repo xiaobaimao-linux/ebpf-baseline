@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FIM 使用手册 · 谛听（Diting）</title>
+<style>
+  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;max-width:880px;margin:40px auto;padding:0 20px;color:#24292f;line-height:1.7}
+  h1{border-bottom:2px solid #1f6feb;padding-bottom:10px}
+  h2{margin-top:36px;border-bottom:1px solid #d0d7de;padding-bottom:6px}
+  h3{margin-top:24px}
+  table{border-collapse:collapse;width:100%;margin:12px 0}
+  th,td{border:1px solid #d0d7de;padding:7px 12px;text-align:left;font-size:.92rem}
+  th{background:#f6f8fa}
+  pre{background:#0d1117;color:#c9d1d9;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:.88rem}
+  code{background:#eff1f3;border-radius:4px;padding:1px 5px;font-size:.9em}
+  pre code{background:none;padding:0}
+  blockquote{border-left:4px solid #d0d7de;margin:12px 0;padding:4px 16px;color:#57606a;background:#f6f8fa}
+  .nav{margin-bottom:24px}
+  .nav a{color:#1f6feb;text-decoration:none}
+</style>
+</head>
+<body>
+<p class="nav"><a href="index.html">← 返回帮助中心</a></p>
+<h1>文件完整性监控（FIM）使用手册</h1>
+<p>谛听的 FIM 能力由两部分组成：<strong>SQLite 基线快照</strong>（静态可信基准）与 <strong>eBPF 实时监控</strong>（运行时篡改检测）。本手册覆盖全部子命令参数、双模式差异、告警规则与钉钉配置。</p>
+
+<h2>1. 基线快照管理（baseline 子命令组）</h2>
+<p>所有子命令默认读取内置默认 SQLite 库，支持 <code>--db</code> 自定义路径。数据表：<code>baseline_entries</code>（基线记录）、<code>alerts</code>（告警持久化）。</p>
+
+<h3>1.1 snapshot 采集可信基线</h3>
+<p>递归扫描文件/目录，写入哈希、权限、属主；重复执行自动更新条目。</p>
+<pre><code># 采集 /etc 基线，自定义标签，排除缓存目录
+sudo ./baseline-guard baseline snapshot /etc --label release-202608 --exclude /etc/cache
+# 仅扫描一级目录，不递归
+sudo ./baseline-guard baseline snapshot /tmp/fimtest --no-recurse
+# 指定独立数据库
+sudo ./baseline-guard baseline snapshot /tmp/fimtest --db /var/lib/baseline-guard/baseline.db</code></pre>
+<table>
+<tr><th>参数</th><th>说明</th></tr>
+<tr><td>PATH</td><td>待采集文件/目录，支持多路径</td></tr>
+<tr><td>--db PATH</td><td>指定 SQLite 基线库</td></tr>
+<tr><td>--label NAME</td><td>快照标签，默认 default</td></tr>
+<tr><td>--exclude PATH</td><td>排除路径，可多次使用</td></tr>
+<tr><td>--no-recurse</td><td>目录仅扫描直接子项</td></tr>
+</table>
+
+<h3>1.2 list 基线清单查询</h3>
+<pre><code>sudo ./baseline-guard baseline list --path-filter "/tmp/fimtest/%"
+sudo ./baseline-guard baseline list --limit 50 --offset 50
+sudo ./baseline-guard baseline list --json > baseline_backup.json</code></pre>
+<table>
+<tr><th>参数</th><th>说明</th></tr>
+<tr><td>--path-filter PATTERN</td><td>SQL 模糊匹配，% 为通配符</td></tr>
+<tr><td>--limit N / --offset N</td><td>分页控制</td></tr>
+<tr><td>--json</td><td>标准 JSON 输出</td></tr>
+</table>
+
+<h3>1.3 delete 删除基线记录</h3>
+<p>仅删除库内条目，<strong>不会删除磁盘真实文件</strong>。</p>
+<pre><code>sudo ./baseline-guard baseline delete /tmp/fimtest/newfile.txt
+sudo ./baseline-guard baseline delete /tmp/fimtest --recurse</code></pre>
+
+<h3>1.4 check 离线基线全量核查</h3>
+<p>读取基线库与磁盘真实文件比对，识别 4 类风险；告警入库，支持钉钉推送与 HTML 报表。</p>
+<pre><code>sudo ./baseline-guard baseline check
+sudo ./baseline-guard baseline check --send-webhook --config config.yaml
+sudo ./baseline-guard baseline check --report_html baseline_report.html
+sudo ./baseline-guard baseline check --path-filter "/tmp/fimtest%"</code></pre>
+<table>
+<tr><th>参数</th><th>说明</th></tr>
+<tr><td>--db PATH</td><td>指定基线数据库</td></tr>
+<tr><td>--path-filter PATTERN</td><td>限定校验路径范围</td></tr>
+<tr><td>--send-webhook</td><td>开启钉钉推送，依赖 --config</td></tr>
+<tr><td>-c/--config</td><td>加载含钉钉 webhook 的 YAML 配置</td></tr>
+<tr><td>--report_html FILE</td><td>输出 HTML 合规报表</td></tr>
+<tr><td>--json</td><td>JSON 结构化差异输出</td></tr>
+</table>
+<p>比对风险类型：</p>
+<table>
+<tr><th>event_type</th><th>等级</th><th>触发场景</th></tr>
+<tr><td>missing</td><td>high</td><td>基线存在，磁盘文件已删除</td></tr>
+<tr><td>hash_changed</td><td>high</td><td>SHA256 不一致，内容篡改</td></tr>
+<tr><td>perm_changed</td><td>medium</td><td>UID/GID/权限变更</td></tr>
+<tr><td>access_failed</td><td>medium</td><td>无权限读取，无法校验哈希</td></tr>
+</table>
+<blockquote>关键规则：仅校验库内存在的基线文件；不跟随软链接；文件已偏离基线时，重复执行 chmod 至违规值仍会告警。</blockquote>
+
+<h3>1.5 clean 清理僵尸基线</h3>
+<pre><code>sudo ./baseline-guard baseline clean --dry-run   # 预演，仅打印
+sudo ./baseline-guard baseline clean             # 执行清理</code></pre>
+
+<h2>2. monitor 实时监控（双模式）</h2>
+<p>基于 eBPF LSM 捕获 write/chmod/chown/unlink 等文件操作。</p>
+<h3>2.1 纯 YAML 监控（无 --db）</h3>
+<pre><code>sudo ./baseline-guard monitor -c config.yaml</code></pre>
+<p>仅按 <code>file_rules</code> 规则匹配路径事件，产出 <code>yaml-rule</code> 告警；不加载基线、不自检、无比对。</p>
+<h3>2.2 基线监控模式（携带 --db）</h3>
+<pre><code># 默认：启动先全量自检，再进入实时监控
+sudo ./baseline-guard monitor --db baseline.db -c config.yaml
+# 跳过开机自检
+sudo ./baseline-guard monitor --db baseline.db -c config.yaml --skip-boot-baseline-check
+# 可选兜底定时扫描（最小 60s，默认关闭）
+sudo ./baseline-guard monitor --db baseline.db -c config.yaml --baseline-scan-interval 300</code></pre>
+<table>
+<tr><th>参数</th><th>类型</th><th>默认</th><th>说明</th></tr>
+<tr><td>--skip-boot-baseline-check</td><td>布尔</td><td>关闭</td><td>跳过 monitor 启动自检</td></tr>
+<tr><td>--baseline-scan-interval SEC</td><td>整数</td><td>未启用</td><td>兜底周期全库扫描；&lt;60 直接报错；告警独立冷却</td></tr>
+</table>
+
+<h3>2.3 告警来源区分（统一存 alerts 表）</h3>
+<table>
+<tr><th>来源</th><th>产出</th><th>冷却策略</th></tr>
+<tr><td>baseline-check</td><td>开机自检 / 定时扫描 / 手动 check</td><td>独立 5 分钟冷却</td></tr>
+<tr><td>baseline</td><td>实时捕获文件操作比对基线发现篡改</td><td>1 分钟降噪</td></tr>
+<tr><td>yaml-rule</td><td>纯 YAML 规则匹配</td><td>沿用告警节流策略</td></tr>
+</table>
+<blockquote>架构优化点：移除默认 10s 高频轮询；仅开机一次自检兜底存量篡改，无后台持续扫描。</blockquote>
+
+<h2>3. 告警查询与报表</h2>
+<pre><code>sudo ./baseline-guard alerts                     # 最新 20 条告警
+sudo ./baseline-guard alerts --rule baseline     # 仅实时篡改告警
+sudo ./baseline-guard report --start 2026-08-01 --end 2026-08-15 -o full_audit.html</code></pre>
+
+<h2>4. 钉钉告警配置</h2>
+<pre><code># config.yaml
+dingtalk:
+  webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+  secret: "SECxxxxxxx"        # 生产环境启用签名校验
+
+file_rules:                   # 纯 YAML 监控模式的文件规则
+  - path: "/tmp/fimtest/*"
+    events: ["write", "delete", "chmod", "chown"]</code></pre>
+<blockquote>约束：使用 <code>--send-webhook</code> 必须通过 <code>-c/--config</code> 加载配置，缺失则仅本地存告警、不推送并打印警告。</blockquote>
+
+<h2>5. 核心逻辑规则（测试验证定稿）</h2>
+<ol>
+<li>基线比对仅对比磁盘当前真实元数据与库内基线，不判断单次操作前后是否变化；文件已偏离基线时，重复执行同一 chmod/chown 仍产生 perm_changed 告警。</li>
+<li>monitor 基线模式启动执行一次全基线自检捕获停机期间篡改；自检后无后台自动扫描，仅靠 eBPF 事件驱动校验。</li>
+<li>定时兜底扫描默认关闭；启用强制最低 60 秒间隔，扫描告警独立冷却。</li>
+<li>baseline delete 仅删库内记录，删除后 check/monitor 均不再校验该路径。</li>
+<li>monitor 不带 --db 时完全隔离基线逻辑，仅执行 YAML 路径事件监控。</li>
+</ol>
+
+<h2>6. 标准链路速查</h2>
+<pre><code>make
+mkdir -p /tmp/fimtest && echo "test" > /tmp/fimtest/test.txt
+sudo ./baseline-guard baseline snapshot /tmp/fimtest
+sudo ./baseline-guard baseline check
+sudo ./baseline-guard monitor --db baseline.db -c ./config.yaml
+# 另开终端模拟篡改：
+echo "modify" > /tmp/fimtest/test.txt && chmod 777 /tmp/fimtest/test.txt
+sudo ./baseline-guard alerts
+sudo ./baseline-guard report -o fim_audit_report.html</code></pre>
+
+<p class="nav"><a href="index.html">← 返回帮助中心</a> · <a href="telemetry-guide.html">运行时遥测手册 →</a></p>
+</body>
+</html>

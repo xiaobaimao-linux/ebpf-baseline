@@ -31,9 +31,9 @@
 
 | 采集点 | 4.18（RHEL8/CentOS8） | 5.4（Ubuntu 20.04） | 5.10 | 6.x |
 |--------|----------------------|---------------------|------|-----|
-| LSM file_open（BPF LSM） | 🔴 BPF LSM 5.7 才合入，RHEL8 未 backport；替代：kprobe `security_file_open`（仓库 `bpf/lsm_kprobe.bpf.c`） | 🔴 同上，替代同上 | 🟢 5.7+ 满足，ringbuf 5.8+ 满足 | 🟢 原生 |
+| LSM file_open（BPF LSM） | 🔴 BPF LSM 5.7 才合入，RHEL8 未 backport；替代：kprobe `security_file_open`（仓库 `bpf/lsm_kprobe.bpf.c`） | 🔴 **实测**：内核拒绝（BTF 无 LSM 钩子类型 ID，ESRCH）；kprobe 替代实测加载 attach 5/5 ✓（2026-09-29 冒烟，详见 §6） | 🟢 5.7+ 满足，ringbuf 5.8+ 满足 | 🟢 原生 |
 | sched_process_exec（tracepoint） | 🟡 挂点存在；ringbuf 需 5.8 → 走 perf buffer 降级 | 🟡 同上 | 🟢 原生 | 🟢 原生 |
-| tcp_v4_connect（kprobe） | 🟡 函数存在；ringbuf 降级；RHEL8 BTF backport 下 CO-RE 可用（小版本待实测） | 🟡 函数存在；ringbuf 降级；BTF 可用性以目标机 /sys/kernel/btf/vmlinux 为准（待实测），若无 BTF 需按内核头文件编译 | 🟢 原生 | 🟢 原生 |
+| tcp_v4_connect（kprobe） | 🟡 函数存在；ringbuf 降级；RHEL8 BTF backport 下 CO-RE 可用（小版本待实测） | 🟡 函数存在；ringbuf 需 perf 降级（实测 map 创建 EINVAL）；BTF **实测存在**（20.04.1 / 5.4.0-216），CO-RE 可用 ✓（§6） | 🟢 原生 | 🟢 原生 |
 | inet_csk_accept（kretprobe） | 🟡 同 tcp_v4_connect | 🟡 同 tcp_v4_connect | 🟢 原生 | 🟢 原生 |
 | sys_enter_bind | 🟡 syscall tracepoint 4.18 已存在（源码核实）；ringbuf 降级 | 🟡 同上 | 🟢 原生 | 🟢 原生 |
 | sys_enter_sendto（DNS） | 🟡 同 sys_enter_bind | 🟡 同 sys_enter_bind | 🟢 原生 | 🟢 原生 |
@@ -73,10 +73,9 @@
 - 两个函数在四档内核源码树均存在且非 static，kprobe/kretprobe 基础设施 4.1 起
   支持 BPF —— 挂点层面四档全绿。
 - 🟡 的两层前提：① ringbuf 需 perf buffer 降级（同 sched_process_exec）；
-  ② CO-RE 需内核 BTF：RHEL8 有 BTF backport（具体小版本 **待实测**）；
-  Ubuntu 20.04 GA 5.4 内核的 BTF 可用性**待实测**（以目标机
-  `/sys/kernel/btf/vmlinux` 是否存在为准）；若无 BTF 则需按目标内核头文件
-  非 CO-RE 编译（或换 HWE 内核）。
+  ② CO-RE 需内核 BTF：Ubuntu 20.04 GA 5.4 **实测有 BTF**（20.04.1 / 5.4.0-216，
+  `/sys/kernel/btf/vmlinux` 存在，CO-RE 加载成功，2026-09-29 §6）；
+  RHEL8 有 BTF backport（具体小版本 **待实测**）。
 
 ### sys_enter_* 系（bind / sendto / setuid 系 / capset / ptrace / mount / unshare / setns）
 - syscall tracepoints 机制在 4.18 已存在（`HAVE_SYSCALL_TRACEPOINTS` + 动态注册
@@ -99,9 +98,11 @@
 ## 4. 待实测清单（未验证项汇总）
 
 1. RHEL8 具体小版本是否有 `/sys/kernel/btf/vmlinux`（决定 4.18 档 CO-RE 可用性）。
-2. Ubuntu 20.04 GA 5.4 内核是否开启 `CONFIG_DEBUG_INFO_BTF`（决定 5.4 档 CO-RE
-   可用性 / 是否必须按内核头文件编译）。
+2. ~~Ubuntu 20.04 GA 5.4 内核是否开启 `CONFIG_DEBUG_INFO_BTF`~~ **已实测（2026-09-29）**：
+   Ubuntu 20.04.1 / 5.4.0-216-generic 存在 `/sys/kernel/btf/vmlinux`（4.5MB），
+   CO-RE 探针（lsm_kprobe）加载成功——**5.4 档有 BTF，无需按内核头文件编译**。
 3. `lsm_kprobe` 替代路径在 RHEL8 4.18 上的加载实测（红格替代方案的落地验证）。
+   —— 5.4 档**已实测通过**（2026-09-29：load PASS、attach 5/5，见 §6）；4.18 仍待实测。
 4. `priv_watch` / `net_watch` perf buffer 降级版的开发与在 4.18/5.4 上的实测
    （当前未实现，黄格未落地）。
 5. `module:module_load` 事件在 5.x 真机上的实际上报字段（布局已源码核实一致，
@@ -135,3 +136,31 @@
    仓库解析按 `taints + __data_loc` 布局实现，与 v3.10 以来的实际布局一致
    （源码核实）；头注释中"5.x 布局不同"的说法仅适用于 3.10 之前的 2.6 内核，
    超出当前支持档位。结论：维持现解析。
+
+## 6. 冒烟实测记录（2026-09-29，Ubuntu 20.04.1 / 内核 5.4.0-216-generic，VM 192.168.125.130）
+
+工具：静态编译的 `smoke_load`（逐个 open/load/attach 仓库 .bpf.o）+ `smoke_tp`
+（tracepoint sys_enter_bind + perf buffer 出事件验证）。对照组：开发机 7.0 内核
+六对象全部 load+attach 通过（34 个 prog）。
+
+| 探针对象 | 5.4 实测 | 失败点 / 说明 |
+| --- | --- | --- |
+| lsm_file.bpf.o（LSM+ringbuf） | ❌ | map `rb` 创建 EINVAL（ringbuf 需 5.8+），先于 LSM 类型检查失败 |
+| lsm_file_perf.bpf.o（LSM+perf） | ❌ | BTF 中无 `file_permission` 钩子类型 ID（ESRCH）——BPF LSM 不可用的直接证据 |
+| **lsm_kprobe.bpf.o（kprobe+perf）** | ✅ | **load PASS、attach 5/5——红格替代路径实测落地** |
+| net_watch.bpf.o | ❌ | map `net_events` 创建 EINVAL（ringbuf）——挂点无恙，败在事件通道 |
+| priv_watch.bpf.o | ❌ | 同上（`priv_events` EINVAL） |
+| proc_watch.bpf.o | ❌ | 同上（`proc_events` EINVAL） |
+| smoke_tp（tracepoint+perf） | ✅ | attach 成功，实测收到 bind 事件——**tracepoint 挂点 + perf 降级通道 5.4 可用** |
+
+整机行为（gitee HEAD 用户态在 5.4 本机编译运行）：
+- 内核检测生效：日志 `[bpf_compat] kernel < 5.7, using kprobe mode — BLOCK actions
+  degraded to ALERT only`，自动切换 kprobe 降级模式，进程不崩溃、优雅退出（exit 0）；
+- **发现缺口**：kprobe 降级分支**不初始化遥测**（遥测初始化代码在 ringbuf 主分支内），
+  配置开关开着、日志却无任何遥测加载失败警告——静默缺失。建议：降级分支补一行
+  `[telemetry] kernel 5.4 无 ring buffer，遥测不可用（perf 降级版待开发）` 提示；
+- 5.4 本机编译适配记录（供后续参考）：需源码装 libbpf 1.3（apt 版太旧）、fmt 10
+  （apt 6.x 与 bundled spdlog 不兼容）、新版 `linux/bpf.h` UAPI 头（20.04 自带无
+  `bpf_link_type`）、Makefile 补 `-lpthread`（glibc 2.31 不合并 pthread）。
+
+待办跟踪：遥测 perf buffer 降级版（net/priv/proc）开发后回本机复测（§4 第 4 条）。
