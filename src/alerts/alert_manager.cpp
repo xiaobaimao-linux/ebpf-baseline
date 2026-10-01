@@ -186,6 +186,9 @@ void AlertManager::SaveAlertToDB(const AlertEvent& event, bool dingtalk_sent) {
     record.expected     = event.expected;
     record.actual       = event.actual;
     record.action_taken = event.action_taken.empty() ? "alert" : event.action_taken;
+    record.exe          = event.exe;
+    record.container_id = event.container_id;
+    record.ancestors    = event.ancestors;
     record.dingtalk_sent = dingtalk_sent;
     record.recorded_at  = event.timestamp.empty() ? NowString() : event.timestamp;
 
@@ -267,6 +270,13 @@ bool AlertManager::SendDingTalk(const AlertEvent& event) {
     md += "**实际值**: `" + event.actual + "`\n\n";
     if (!event.process_name.empty()) {
         md += "**进程**: " + event.process_name + " (pid=" + std::to_string(event.pid) + ")\n\n";
+    }
+    // 进程上下文扩展（M0-1）：有值才追加，模板其余部分不变
+    if (!event.exe.empty()) {
+        md += "**进程路径**: `" + event.exe + "`\n\n";
+    }
+    if (!event.container_id.empty()) {
+        md += "**容器**: `" + event.container_id + "`\n\n";
     }
     if (!event.event_type.empty()) {
         md += "**事件类型**: " + event.event_type + "\n\n";

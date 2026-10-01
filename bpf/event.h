@@ -52,6 +52,9 @@ struct event {
     unsigned int new_mode;    // chmod: new mode
     unsigned int new_uid;     // chown: new uid
     unsigned int new_gid;     // chown: new gid
+    unsigned int uid;         // 触发进程 real uid
+    unsigned int gid;         // 触发进程 real gid
+    unsigned long long start_time; // 进程启动时间（ns，CLOCK_MONOTONIC 域）
 };
 
 #endif

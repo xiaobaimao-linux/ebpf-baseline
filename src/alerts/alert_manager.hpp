@@ -9,6 +9,21 @@
 
 using json = nlohmann::json;
 
+// ── 文件事件进程上下文（消费线程按 (pid, start_time) 查进程树组装）────
+// valid=true  ：树命中，uid/gid/ppid/exe/container_id 取自进程树节点
+// valid=false ：树 miss，uid/gid 用事件值、user_name 用 getpwuid 兜底，
+//               其余字段留空。getpwuid/container_id_of 仅在消费线程调用。
+struct FileActorContext {
+    unsigned int uid = 0;
+    unsigned int gid = 0;
+    unsigned int ppid = 0;
+    std::string user_name;
+    std::string exe;
+    std::string container_id;
+    json ancestors = json::array();  // [{pid,comm,exe}] 自近及远 ≤8 层
+    bool valid = false;
+};
+
 struct AlertEvent {
     std::string rule_id;
     std::string rule_name;
@@ -23,6 +38,9 @@ struct AlertEvent {
     std::string timestamp;
     std::string event_type;     // 事件类型: read / write / check_fail
     std::string action_taken;   // alert / block / report_only
+    std::string exe;            // 触发进程可执行文件路径（进程树命中时非空）
+    std::string container_id;   // 12 位容器短 ID（容器内触发时非空）
+    std::string ancestors;      // 祖先链 JSON 数组串（可为空）
 };
 
 class AlertManager {

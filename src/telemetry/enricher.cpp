@@ -3,19 +3,20 @@
 // 自近及远最多上溯的祖先层数
 static constexpr int kMaxAncestors = 8;
 
-void Enricher::enrich(const EventRecord& rec, nlohmann::json& j) const {
+nlohmann::json Enricher::ancestors_of(unsigned int pid,
+                                      unsigned int fallback_ppid) const {
     nlohmann::json ancestors = nlohmann::json::array();
 
     // 起点：事件进程的父进程。优先用树中该进程节点的 ppid（更可靠），
     // 树中查不到（短寿进程已清除）则退回事件自带的 ppid。
-    unsigned int parent = rec.ppid;
-    if (const ProcNode* self = tree_.find(rec.pid))
+    unsigned int parent = fallback_ppid;
+    if (const ProcNode* self = tree_.find(pid))
         parent = self->ppid;
 
     // 环路检测：记录本链已访问的 pid（含事件进程自身）
     unsigned int visited[kMaxAncestors + 1];
     int nvisited = 0;
-    visited[nvisited++] = rec.pid;
+    visited[nvisited++] = pid;
 
     for (int level = 0; level < kMaxAncestors && parent > 0; level++) {
         bool seen = false;
@@ -43,8 +44,12 @@ void Enricher::enrich(const EventRecord& rec, nlohmann::json& j) const {
         parent = node->ppid;
     }
 
+    return ancestors;
+}
+
+void Enricher::enrich(const EventRecord& rec, nlohmann::json& j) const {
     // 确保 process 对象存在后写入祖先链
     if (!j.contains("process") || !j["process"].is_object())
         j["process"] = nlohmann::json::object();
-    j["process"]["ancestors"] = ancestors;
+    j["process"]["ancestors"] = ancestors_of(rec.pid, rec.ppid);
 }

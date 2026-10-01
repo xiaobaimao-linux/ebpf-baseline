@@ -149,15 +149,24 @@ void init_inode_maps(const Config &config) {
 }
 
 
-void on_violation_detected(const Rule& rule, 
+void on_violation_detected(const Rule& rule,
                            const std::string& file_path,
                            const std::string& actual_mode,
                            const std::string& proc_name,
                            int pid,
-                           AlertManager& alert_mgr)
+                           AlertManager& alert_mgr,
+                           const FileActorContext* actor)
 {
+    // actor 非空（进程树命中）：user_name/uid 直接用 actor 值，跳过 /proc 读取；
+    // actor 为空走现有 /proc 兜底（行为与现状一致）
     std::string uid;
-    const std::string user_name = ResolveUserInfoByPid(pid, uid);
+    std::string user_name;
+    if (actor != nullptr) {
+        uid = std::to_string(actor->uid);
+        user_name = actor->user_name;
+    } else {
+        user_name = ResolveUserInfoByPid(pid, uid);
+    }
 
     // 1. 写日志
     spdlog::warn("VIOLATION: {} mode {} -> {} by {}/{} user={} uid={}",
@@ -180,6 +189,11 @@ void on_violation_detected(const Rule& rule,
     evt.timestamp    = NowString();
     evt.event_type   = actual_mode;  // read / write
     evt.action_taken = actionToString(rule.monitor_action);
+    if (actor != nullptr) {
+        evt.exe          = actor->exe;
+        evt.container_id = actor->container_id;
+        evt.ancestors    = actor->ancestors.empty() ? "" : actor->ancestors.dump();
+    }
 
     alert_mgr.SendDingTalk(evt);
 }
@@ -188,7 +202,8 @@ void on_check_mismatch_detected(const Rule& rule,
                                 const std::string& file_path,
                                 const std::string& proc_name,
                                 int pid,
-                                AlertManager& alert_mgr)
+                                AlertManager& alert_mgr,
+                                const FileActorContext* actor)
 {
     if (!rule.has_check || rule.check_path.empty() || rule.check_path != file_path) {
         return;
@@ -227,7 +242,13 @@ void on_check_mismatch_detected(const Rule& rule,
     }
 
     std::string uid;
-    const std::string user_name = ResolveUserInfoByPid(pid, uid);
+    std::string user_name;
+    if (actor != nullptr) {
+        uid = std::to_string(actor->uid);
+        user_name = actor->user_name;
+    } else {
+        user_name = ResolveUserInfoByPid(pid, uid);
+    }
 
     std::ostringstream msg;
     msg << "check mismatch detected by monitor";
@@ -263,6 +284,11 @@ void on_check_mismatch_detected(const Rule& rule,
         evt.expected += "|hash=" + rule.check_hash;
         evt.actual += "|hash=" + actual_hash;
     }
+    if (actor != nullptr) {
+        evt.exe          = actor->exe;
+        evt.container_id = actor->container_id;
+        evt.ancestors    = actor->ancestors.empty() ? "" : actor->ancestors.dump();
+    }
 
     alert_mgr.SendDingTalk(evt);
 }
@@ -271,7 +297,8 @@ void on_check_mismatch_detected(const Rule& rule,
 // eBPF 拦截到 chmod/chown 后，直接用事件中的新值与基线比对
 // 无需 stat 磁盘文件（LSM hook 在操作前触发，磁盘上仍是旧值）
 static void handle_chmod_chown_event(const struct event *e,
-                                      AlertManager& alert_mgr) {
+                                      AlertManager& alert_mgr,
+                                      const FileActorContext* actor) {
     auto it_bl = g_inode_to_baseline.find(e->ino);
     if (it_bl == g_inode_to_baseline.end())
         return;
@@ -291,7 +318,8 @@ static void handle_chmod_chown_event(const struct event *e,
             dev.severity   = "medium";
             dev.expected   = "mode=" + baseline.permission;
             dev.actual     = "mode=" + actual_perm;
-            HandleBaselineDeviation(dev, file_path, proc_name, e->pid, alert_mgr);
+            HandleBaselineDeviation(dev, file_path, proc_name, e->pid, alert_mgr,
+                                    kBaselineRuleId, actor);
         }
     } else if (e->event_type == EVENT_CHOWN) {
         bool uid_diff = (static_cast<int64_t>(e->new_uid) != baseline.uid);
@@ -313,7 +341,8 @@ static void handle_chmod_chown_event(const struct event *e,
             }
             dev.expected = exp_parts;
             dev.actual   = act_parts;
-            HandleBaselineDeviation(dev, file_path, proc_name, e->pid, alert_mgr);
+            HandleBaselineDeviation(dev, file_path, proc_name, e->pid, alert_mgr,
+                                    kBaselineRuleId, actor);
         }
     }
 }
@@ -329,7 +358,10 @@ struct MonitorContext {
 };
 
 // ── 核心事件处理逻辑（前向声明）─────────────────────────────────────
-static void process_event_core(struct event* e, MonitorContext* mctx);
+// actor 非空时为消费线程按 (pid, start_time) 查进程树组装的进程上下文，
+// 用于告警富化（user_name/uid/exe/container_id/ancestors）；为空走原兜底。
+static void process_event_core(struct event* e, MonitorContext* mctx,
+                               const FileActorContext* actor = nullptr);
 
 // ── 事件回调（ring buffer 路径）：struct event 归一化为 EventRecord 入事件总线 ──
 // 只做归一化 + try_push（禁 malloc / 阻塞 / /proc IO），由消费线程路由回
@@ -373,13 +405,14 @@ static void perf_event_cb(void *ctx, int cpu, void *data, __u32 size) {
 }
 
 // ── 核心事件处理逻辑 ────────────────────────────────────────────────
-static void process_event_core(struct event* e, MonitorContext* mctx) {
+static void process_event_core(struct event* e, MonitorContext* mctx,
+                               const FileActorContext* actor) {
     AlertManager* alert_mgr = mctx->alert_mgr;
 
     // ── chmod/chown/unlink 实时检测（--db 模式下，eBPF 直接拦截）────────
     if (!g_inode_to_baseline.empty() && alert_mgr != nullptr) {
         if (e->event_type == EVENT_CHMOD || e->event_type == EVENT_CHOWN) {
-            handle_chmod_chown_event(e, *alert_mgr);
+            handle_chmod_chown_event(e, *alert_mgr, actor);
             return;
         }
         if (e->event_type == EVENT_UNLINK) {
@@ -394,7 +427,8 @@ static void process_event_core(struct event* e, MonitorContext* mctx) {
                 dev.severity   = "high";
                 dev.expected   = "file exists";
                 dev.actual     = "file deleted (unlink detected by eBPF)";
-                HandleBaselineDeviation(dev, file_path, proc_name, e->pid, *alert_mgr);
+                HandleBaselineDeviation(dev, file_path, proc_name, e->pid, *alert_mgr,
+                                        kBaselineRuleId, actor);
             }
             return;
         }
@@ -411,11 +445,12 @@ static void process_event_core(struct event* e, MonitorContext* mctx) {
 
             const std::string actual_event = ((e->mask & EVENT_READ) != 0) ? "read" : "write";
             if (alert_mgr != nullptr) {
-                on_violation_detected(rule, path, actual_event, e->comm, e->pid, *alert_mgr);
+                on_violation_detected(rule, path, actual_event, e->comm, e->pid, *alert_mgr,
+                                      actor);
             }
 
             if (alert_mgr != nullptr && (e->mask & EVENT_WRITE) != 0) {
-                on_check_mismatch_detected(rule, path, e->comm, e->pid, *alert_mgr);
+                on_check_mismatch_detected(rule, path, e->comm, e->pid, *alert_mgr, actor);
             }
         }
 
@@ -476,16 +511,18 @@ static void process_event_core(struct event* e, MonitorContext* mctx) {
 
             std::vector<BaselineDeviation> devs = CompareWithBaseline(baseline, full_path);
             for (const auto& dev : devs) {
-                HandleBaselineDeviation(dev, full_path, e->comm, e->pid, *alert_mgr);
+                HandleBaselineDeviation(dev, full_path, e->comm, e->pid, *alert_mgr,
+                                        kBaselineRuleId, actor);
             }
         }
     }
 }
 
 // ── 批量处理：遍历缓冲区中的所有事件，逐条调用核心处理逻辑 ────────
+// perf buffer 路径（5.7 / 5.4）无进程树上下文，actor 传 nullptr 走原兜底。
 static void FlushEventBatch(MonitorContext* mctx) {
     for (auto& e : mctx->event_batch) {
-        process_event_core(&e, mctx);
+        process_event_core(&e, mctx, nullptr);
     }
     mctx->event_batch.clear();
 }
@@ -565,8 +602,9 @@ static int common_monitor_init(int fd_actions,
                 for (const auto& [ino, entry] : g_inode_to_baseline) {
                     std::vector<BaselineDeviation> devs = CompareWithBaseline(entry, entry.file_path);
                     for (const auto& dev : devs) {
+                        // boot check 无进程上下文（启动时无事件关联），actor 传 nullptr
                         HandleBaselineDeviation(dev, entry.file_path, "-", 0, alert_mgr,
-                                                kBaselineCheckRuleId);
+                                                kBaselineCheckRuleId, nullptr);
                         ++boot_devs;
                     }
                 }
@@ -628,11 +666,40 @@ struct TelemetryRuntime {
     Enricher*              enricher  = nullptr;
     EventStore*            store     = nullptr;   // store 关闭时为 nullptr
     bool                   store_on  = false;
+    bool                   proc_tree_on = false;  // proc_watch 启动成功为 true（文件事件富化）
     volatile bool*         running   = nullptr;   // 全局退出标志
     AlertManager*          alert_mgr = nullptr;   // retention（已移至消费线程）
 };
 
-// 路由单条事件：file→原处理函数（行为零变化）、process→先更新进程树
+// ── 文件事件进程上下文组装（仅消费线程调用）────────────────────────
+// 按 (pid, start_time) 查进程树：命中填节点 uid/gid/ppid/exe/container_id
+// （valid=true）；miss 时 uid/gid 用事件值、user_name 用 getpwuid(uid) 兜底，
+// 其余留空（valid=false）。祖先链复用 Enricher 逻辑，自近及远 ≤8 层。
+static FileActorContext build_file_actor(const struct event& e, TelemetryRuntime* rt) {
+    FileActorContext actor;
+    unsigned int ppid = 0;
+    if (const ProcNode* node = rt->tree->find(e.pid, e.start_time)) {
+        actor.uid = node->uid;
+        actor.gid = node->gid;
+        actor.ppid = node->ppid;
+        actor.exe = node->exe_str();
+        actor.container_id = node->container_id_str();
+        if (struct passwd* pw = getpwuid(static_cast<uid_t>(node->uid)))
+            actor.user_name = pw->pw_name;
+        actor.valid = true;
+        ppid = node->ppid;
+    } else {
+        actor.uid = e.uid;
+        actor.gid = e.gid;
+        if (struct passwd* pw = getpwuid(static_cast<uid_t>(e.uid)))
+            actor.user_name = pw->pw_name;
+    }
+    actor.ancestors = rt->enricher->ancestors_of(e.pid, ppid);
+    return actor;
+}
+
+// 路由单条事件：file→查进程树拼进程上下文后回原处理函数（告警富化 exe/
+// container_id/ancestors，树关闭时行为与现状一致）、process→先更新进程树
 // （exec 另落库）、network/dns/priv/ns→渲染 JSON 走原日志输出（行为零变化），
 // store 开启时富化祖先链并落库。
 static void route_event(EventRecord& rec, TelemetryRuntime* rt) {
@@ -645,7 +712,15 @@ static void route_event(EventRecord& rec, TelemetryRuntime* rt) {
     case CAT_FILE: {
         struct event fe;
         memcpy(&fe, rec.payload_json, sizeof(fe));
-        process_event_core(&fe, rt->mctx);
+        // 进程树开启时按 (pid, start_time) 查树拼进程上下文再处理（告警富化）；
+        // 树关闭（proc_watch 启动失败/旧内核路径）传 nullptr，行为与现状一致。
+        FileActorContext actor;
+        const FileActorContext* actor_ptr = nullptr;
+        if (rt->proc_tree_on) {
+            actor = build_file_actor(fe, rt);
+            actor_ptr = &actor;
+        }
+        process_event_core(&fe, rt->mctx, actor_ptr);
         break;
     }
     case CAT_PROCESS: {
@@ -703,8 +778,9 @@ static void route_event(EventRecord& rec, TelemetryRuntime* rt) {
 // 消费线程主循环：严格先拉 hi 再拉 lo；驱动落库批量刷新、延迟统计（60s）、
 // drop 计数日志（30s）、tombstone sweep（60s）、告警 retention（3600s）。
 static void telemetry_consumer_main(TelemetryRuntime* rt) {
-    if (rt->store_on)
-        rt->tree->bootstrap();
+    // 进程树恒启用（store 关闭也需要：文件事件告警进程上下文富化依赖），
+    // bootstrap 扫 /proc 建初始树（含 uid/gid、容器 ID）
+    rt->tree->bootstrap();
 
     unsigned long long last_stats     = now_monotonic_ns();
     unsigned long long last_drop      = now_monotonic_ns();
@@ -866,6 +942,15 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
         }
     }
 
+    // ── 进程生命周期遥测（恒启动，供进程树 / 文件事件富化；失败降级）──
+    // 须在消费线程创建前启动：消费线程 bootstrap 依赖 fork/exec/exit 事件流
+    // 尽快就位，且 rt.proc_tree_on 需在线程启动前定型
+    struct proc_watch_bpf *proc_skel = nullptr;
+    struct ring_buffer *proc_rb = nullptr;
+    proc_skel = process_monitor_start(&proc_rb, &bus);
+    if (!proc_skel)
+        spdlog::warn("[telemetry.process] proc_watch 启动失败，降级为无进程树富化");
+
     TelemetryRuntime rt;
     rt.bus       = &bus;
     rt.mctx      = &mctx;
@@ -873,6 +958,7 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
     rt.enricher  = &enricher;
     rt.store     = store;
     rt.store_on  = (store != nullptr);
+    rt.proc_tree_on = (proc_skel != nullptr);
     rt.running   = &running;
     rt.alert_mgr = &alert_mgr;
     std::thread consumer_thread(telemetry_consumer_main, &rt);
@@ -913,15 +999,6 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
         priv_skel = privilege_monitor_start(&priv_rb, &bus);
         if (!priv_skel)
             spdlog::warn("[telemetry.privilege] priv_watch 启动失败，降级为无权限遥测");
-    }
-
-    // ── 进程生命周期遥测（仅 telemetry.store 开启时启动，供进程树/富化；失败降级）──
-    struct proc_watch_bpf *proc_skel = nullptr;
-    struct ring_buffer *proc_rb = nullptr;
-    if (store != nullptr) {
-        proc_skel = process_monitor_start(&proc_rb, &bus);
-        if (!proc_skel)
-            spdlog::warn("[telemetry.process] proc_watch 启动失败，降级为无进程树富化");
     }
 
     // epoll 同时等待文件事件 rb 与各路遥测 rb（任一遥测开启时启用）。

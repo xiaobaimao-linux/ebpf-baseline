@@ -72,7 +72,8 @@ void HandleBaselineDeviation(const BaselineDeviation& dev,
                               const std::string& proc_name,
                               int pid,
                               AlertManager& alert_mgr,
-                              const char* rule_id) {
+                              const char* rule_id,
+                              const FileActorContext* actor) {
     // 1. 打印日志
     spdlog::warn("[基线监控告警] event_type={} file={} expected={} actual={} proc={} pid={}",
                  dev.event_type, file_path, dev.expected, dev.actual, proc_name, pid);
@@ -90,6 +91,16 @@ void HandleBaselineDeviation(const BaselineDeviation& dev,
     evt.pid          = pid;
     evt.action_taken = "alert";
     evt.timestamp    = NowString();
+    if (actor != nullptr) {
+        // 进程上下文扩展（M0-1）：仅消费线程组装的 FileActorContext 提供。
+        // user_name/uid 一并取自 actor（跳过 /proc 读取），使基线告警也能
+        // 定位实际操作者；actor 为空（boot check 等）保持既有空值行为。
+        evt.user_name    = actor->user_name;
+        evt.uid          = std::to_string(actor->uid);
+        evt.exe          = actor->exe;
+        evt.container_id = actor->container_id;
+        evt.ancestors    = actor->ancestors.empty() ? "" : actor->ancestors.dump();
+    }
 
     alert_mgr.SendDingTalk(evt);
 }

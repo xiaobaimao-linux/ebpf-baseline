@@ -78,6 +78,9 @@ struct AlertRecord {
     std::string action_taken;   // 采取的动作: alert / block
     bool dingtalk_sent = false; // 是否成功发送钉钉告警
     std::string recorded_at;    // 记录时间
+    std::string exe;            // 触发进程可执行文件路径（M0-1，老库为空串）
+    std::string container_id;   // 12 位容器短 ID（M0-1，老库为空串）
+    std::string ancestors;      // 祖先链 JSON 数组串（M0-1，老库为空串）
 };
 
 class BaselineDB {

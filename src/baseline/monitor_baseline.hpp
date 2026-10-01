@@ -33,10 +33,12 @@ std::vector<BaselineDeviation> CompareWithBaseline(const CheckEntry& baseline,
 
 // 处理一次基线偏差：打印日志 + 通过 AlertManager 落库 + 钉钉推送
 // rule_id 默认实时告警（baseline）；boot check / 离线核查调用方传入
-// baseline-check，使两类告警节流窗口互不抢占
+// baseline-check，使两类告警节流窗口互不抢占。
+// actor 非空时把进程上下文（exe/container_id/ancestors）填入告警（M0-1）。
 void HandleBaselineDeviation(const BaselineDeviation& dev,
                               const std::string& file_path,
                               const std::string& proc_name,
                               int pid,
                               AlertManager& alert_mgr,
-                              const char* rule_id = kBaselineRuleId);
+                              const char* rule_id = kBaselineRuleId,
+                              const FileActorContext* actor = nullptr);

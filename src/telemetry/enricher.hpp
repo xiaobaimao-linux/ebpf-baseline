@@ -16,6 +16,9 @@ public:
     // 沿进程树自事件进程向父链上溯，把祖先链写入 j["process"]["ancestors"]
     void enrich(const EventRecord& rec, nlohmann::json& j) const;
 
+    // 拼祖先链 [{pid,comm,exe}]（自近及远 ≤8 层）；供文件事件告警富化复用
+    nlohmann::json ancestors_of(unsigned int pid, unsigned int fallback_ppid) const;
+
 private:
     const ProcessTree& tree_;
 };

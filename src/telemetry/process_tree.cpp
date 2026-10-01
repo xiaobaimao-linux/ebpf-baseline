@@ -72,6 +72,36 @@ bool read_proc_stat(int pid, std::string* comm, unsigned int* ppid,
     return true;
 }
 
+// 解析 /proc/<pid>/status 的 Uid/Gid 行（real 值，即每行第 1 个数字）；
+// 读不到（短寿进程已回收）返回 false，输出保持 0。bootstrap 补进程身份用。
+bool read_proc_status_ids(int pid, unsigned int* uid, unsigned int* gid) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/status", pid);
+    std::ifstream in(path);
+    if (!in.is_open())
+        return false;
+
+    bool got_uid = false, got_gid = false;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream iss(line);
+        std::string key;
+        unsigned long value = 0;
+        if (line.rfind("Uid:", 0) == 0) {
+            iss >> key >> value;
+            *uid = static_cast<unsigned int>(value);
+            got_uid = true;
+        } else if (line.rfind("Gid:", 0) == 0) {
+            iss >> key >> value;
+            *gid = static_cast<unsigned int>(value);
+            got_gid = true;
+        }
+        if (got_uid && got_gid)
+            break;
+    }
+    return got_uid || got_gid;
+}
+
 } // namespace
 
 void ProcessTree::bootstrap() {
@@ -104,6 +134,16 @@ void ProcessTree::bootstrap() {
         std::string exe = exe_path_of(pid);
         if (!exe.empty())
             record_set_str(node.exe, sizeof(node.exe), exe.c_str(), exe.size());
+        // 进程身份：/proc status 的 Uid/Gid 行 + 容器短 ID（宿主机为空串）
+        unsigned int uid = 0, gid = 0;
+        if (read_proc_status_ids(pid, &uid, &gid)) {
+            node.uid = uid;
+            node.gid = gid;
+        }
+        const std::string cid = container_id_of(pid);
+        if (!cid.empty())
+            record_set_str(node.container_id, sizeof(node.container_id),
+                           cid.c_str(), cid.size());
         upsert(std::move(node));
         loaded++;
     }
@@ -120,7 +160,10 @@ void ProcessTree::apply(const proc_event& pe) {
         ProcNode node;
         node.pid = pe.pid;
         node.ppid = pe.ppid;
+        node.uid = pe.uid;
+        node.gid = pe.gid;
         record_set_str(node.comm, sizeof(node.comm), pe.comm, strnlen(pe.comm, sizeof(pe.comm)));
+        // fork 不填 container_id：子进程尚未 exec，等 exec 事件统一填
 
         unsigned long long start_ns = 0;
         if (read_proc_stat(static_cast<int>(pe.pid), nullptr, nullptr, &start_ns))
@@ -136,9 +179,12 @@ void ProcessTree::apply(const proc_event& pe) {
         // 视为 pid 复用（新进程），重置节点。
         auto it = nodes_.find(pe.pid);
         if (it == nodes_.end()) {
+            // 就地补建：同样存事件 uid/gid，并按当前 /proc 状态填容器 ID
             ProcNode node;
             node.pid = pe.pid;
             node.ppid = pe.ppid;
+            node.uid = pe.uid;
+            node.gid = pe.gid;
             node.start_time = pe.start_time;
             record_set_str(node.comm, sizeof(node.comm), pe.comm,
                            strnlen(pe.comm, sizeof(pe.comm)));
@@ -147,6 +193,10 @@ void ProcessTree::apply(const proc_event& pe) {
                 record_set_str(node.exe, sizeof(node.exe), exe.c_str(), exe.size());
             else
                 record_set_str(node.exe, sizeof(node.exe), pe.exe, strnlen(pe.exe, sizeof(pe.exe)));
+            const std::string cid = container_id_of(static_cast<int>(pe.pid));
+            if (!cid.empty())
+                record_set_str(node.container_id, sizeof(node.container_id),
+                               cid.c_str(), cid.size());
             upsert(std::move(node));
             break;
         }
@@ -157,12 +207,21 @@ void ProcessTree::apply(const proc_event& pe) {
             node.exited = false;
             node.exit_time_ms = 0;
         }
+        node.uid = pe.uid;
+        node.gid = pe.gid;
         record_set_str(node.comm, sizeof(node.comm), pe.comm, strnlen(pe.comm, sizeof(pe.comm)));
         std::string exe = exe_path_of(static_cast<int>(pe.pid));
         if (!exe.empty())
             record_set_str(node.exe, sizeof(node.exe), exe.c_str(), exe.size());
         else if (strnlen(pe.exe, sizeof(pe.exe)) > 0)
             record_set_str(node.exe, sizeof(node.exe), pe.exe, strnlen(pe.exe, sizeof(pe.exe)));
+        // exec 统一刷新容器归属：有容器填短 ID，回到宿主机则清空
+        const std::string cid = container_id_of(static_cast<int>(pe.pid));
+        if (!cid.empty())
+            record_set_str(node.container_id, sizeof(node.container_id),
+                           cid.c_str(), cid.size());
+        else
+            node.container_id[0] = '\0';
         if (pe.start_time != 0)
             node.start_time = pe.start_time;
         node.exited = false;
@@ -180,6 +239,8 @@ void ProcessTree::apply(const proc_event& pe) {
             ProcNode node;
             node.pid = pe.pid;
             node.ppid = pe.ppid;
+            node.uid = pe.uid;
+            node.gid = pe.gid;
             node.start_time = pe.start_time;
             record_set_str(node.comm, sizeof(node.comm), pe.comm,
                            strnlen(pe.comm, sizeof(pe.comm)));
@@ -197,6 +258,18 @@ void ProcessTree::apply(const proc_event& pe) {
 const ProcNode* ProcessTree::find(unsigned int pid) const {
     auto it = nodes_.find(pid);
     return it == nodes_.end() ? nullptr : &it->second;
+}
+
+const ProcNode* ProcessTree::find(unsigned int pid, unsigned long long start_time) const {
+    const ProcNode* node = find(pid);
+    if (node == nullptr)
+        return nullptr;
+    // start_time 非 0 且与节点不一致：视为 pid 复用后的旧进程节点，返回空。
+    // 注：bootstrap/fork 节点的 start_time 来自 /proc stat（USER_HZ 滴答粒度），
+    // 与事件内 task->start_time 精确值可能相差一个滴答，属已知限制。
+    if (start_time != 0 && node->start_time != start_time)
+        return nullptr;
+    return node;
 }
 
 void ProcessTree::sweep_tombstones() {

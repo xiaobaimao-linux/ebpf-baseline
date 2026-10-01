@@ -4,11 +4,59 @@
 #include <spdlog/spdlog.h>
 
 #include <sqlite3.h>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+namespace {
+
+// alerts 表列探测结果（老库兼容：缺列查询侧补空串）
+struct AlertsColumns {
+    bool user_name = false;
+    bool uid = false;
+    bool exe = false;
+    bool container_id = false;
+    bool ancestors = false;
+};
+
+// PRAGMA table_info 探测 alerts 表已有列
+AlertsColumns ProbeAlertsColumns(sqlite3* db) {
+    AlertsColumns cols;
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, "PRAGMA table_info(alerts);", -1, &stmt, nullptr) != SQLITE_OK)
+        return cols;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* name = sqlite3_column_text(stmt, 1);
+        if (name == nullptr)
+            continue;
+        const std::string col = reinterpret_cast<const char*>(name);
+        if (col == "user_name")         cols.user_name = true;
+        else if (col == "uid")          cols.uid = true;
+        else if (col == "exe")          cols.exe = true;
+        else if (col == "container_id") cols.container_id = true;
+        else if (col == "ancestors")    cols.ancestors = true;
+    }
+    sqlite3_finalize(stmt);
+    return cols;
+}
+
+// 组装 alerts 查询 SELECT 列表：既有 14 列顺序逐字节不变，进程上下文扩展列
+// （exe/container_id/ancestors）追加在 recorded_at 之后；老库缺列补空串。
+std::string BuildAlertsSelect(const AlertsColumns& cols) {
+    std::string sql =
+        "SELECT rule_id, rule_name, severity, file_path, event_type, process_name, pid, ";
+    sql += (cols.user_name && cols.uid) ? "user_name, uid, " : "'' AS user_name, '' AS uid, ";
+    sql += "expected, actual, action_taken, dingtalk_sent, recorded_at, ";
+    sql += cols.exe ? "exe, " : "'' AS exe, ";
+    sql += cols.container_id ? "container_id, " : "'' AS container_id, ";
+    sql += cols.ancestors ? "ancestors" : "'' AS ancestors";
+    return sql;
+}
+
+} // namespace
 
 BaselineDB::BaselineDB(const std::string &db_path) {
     const std::filesystem::path path(db_path);
@@ -145,6 +193,16 @@ void BaselineDB::InitTable() {
     // 兼容旧版 alerts 表：重复执行 ALTER TABLE 时忽略 duplicate column 错误。
     sqlite3_exec(db_, "ALTER TABLE alerts ADD COLUMN user_name TEXT DEFAULT '';", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "ALTER TABLE alerts ADD COLUMN uid TEXT DEFAULT '';", nullptr, nullptr, nullptr);
+
+    // 进程上下文扩展列（M0-1）：PRAGMA table_info 探测，缺列才 ALTER 补加。
+    // 老库首次打开即完成迁移；ALTER 失败（极端场景）由查询侧补空串兜底。
+    const AlertsColumns alerts_cols = ProbeAlertsColumns(db_);
+    if (!alerts_cols.exe)
+        sqlite3_exec(db_, "ALTER TABLE alerts ADD COLUMN exe TEXT;", nullptr, nullptr, nullptr);
+    if (!alerts_cols.container_id)
+        sqlite3_exec(db_, "ALTER TABLE alerts ADD COLUMN container_id TEXT;", nullptr, nullptr, nullptr);
+    if (!alerts_cols.ancestors)
+        sqlite3_exec(db_, "ALTER TABLE alerts ADD COLUMN ancestors TEXT;", nullptr, nullptr, nullptr);
 
     const char *copy_sql = R"SQL(
         INSERT OR IGNORE INTO baseline_entries
@@ -513,8 +571,8 @@ void BaselineDB::SaveAlert(const AlertRecord &record) {
             INSERT INTO alerts
             (rule_id, rule_name, severity, file_path, event_type,
              process_name, pid, user_name, uid, expected, actual, action_taken,
-             dingtalk_sent, recorded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+             dingtalk_sent, recorded_at, exe, container_id, ancestors)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         )";
 
     sqlite3_stmt *stmt = nullptr;
@@ -534,6 +592,9 @@ void BaselineDB::SaveAlert(const AlertRecord &record) {
     sqlite3_bind_text(stmt, 12, record.action_taken.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 13, record.dingtalk_sent ? 1 : 0);
     sqlite3_bind_text(stmt, 14, record.recorded_at.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 15, record.exe.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 16, record.container_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 17, record.ancestors.c_str(), -1, SQLITE_STATIC);
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         spdlog::error("Save alert failed: {}", sqlite3_errmsg(db_));
@@ -659,7 +720,8 @@ std::vector<BaselineRecord> BaselineDB::GetAllBaselines() {
 }
 
 
-// 辅助函数：从 sqlite3_stmt 读取一行 AlertRecord（14 列）
+// 辅助函数：从 sqlite3_stmt 读取一行 AlertRecord（前 14 列为既有字段，
+// 顺序逐字节不变；第 15~17 列为进程上下文扩展，老库查询补空串时按列数跳过）
 static AlertRecord ReadAlertRecord(sqlite3_stmt* stmt) {
     AlertRecord r;
     r.rule_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
@@ -676,40 +738,31 @@ static AlertRecord ReadAlertRecord(sqlite3_stmt* stmt) {
     r.action_taken = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11));
     r.dingtalk_sent = sqlite3_column_int(stmt, 12) != 0;
     r.recorded_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 13));
+    // 进程上下文扩展列（NULL 视为空串）
+    const int ncols = sqlite3_column_count(stmt);
+    if (ncols > 14) {
+        const auto* exe = sqlite3_column_text(stmt, 14);
+        if (exe != nullptr)
+            r.exe = reinterpret_cast<const char*>(exe);
+    }
+    if (ncols > 15) {
+        const auto* cid = sqlite3_column_text(stmt, 15);
+        if (cid != nullptr)
+            r.container_id = reinterpret_cast<const char*>(cid);
+    }
+    if (ncols > 16) {
+        const auto* anc = sqlite3_column_text(stmt, 16);
+        if (anc != nullptr)
+            r.ancestors = reinterpret_cast<const char*>(anc);
+    }
     return r;
 }
 
 // 查询告警记录：支持 rule 过滤、今日过滤、数量限制
 std::vector<AlertRecord> BaselineDB::GetAlerts(const std::string &rule_filter, int limit,
                                                bool today) {
-    bool has_user_name = false;
-    bool has_uid = false;
-
-    const char *info_sql = "PRAGMA table_info(alerts);";
-    sqlite3_stmt *info_stmt = nullptr;
-    sqlite3_prepare_v2(db_, info_sql, -1, &info_stmt, nullptr);
-    while (sqlite3_step(info_stmt) == SQLITE_ROW) {
-        const unsigned char *name = sqlite3_column_text(info_stmt, 1);
-        if (name != nullptr) {
-            const std::string col = reinterpret_cast<const char *>(name);
-            if (col == "user_name") {
-                has_user_name = true;
-            }
-            if (col == "uid") {
-                has_uid = true;
-            }
-        }
-    }
-    sqlite3_finalize(info_stmt);
-
-    std::string sql;
-    if (has_user_name && has_uid) {
-        sql = "SELECT rule_id, rule_name, severity, file_path, event_type, process_name, pid, "
-              "user_name, uid, expected, actual, action_taken, dingtalk_sent, recorded_at FROM alerts";
-    } else {
-        sql = "SELECT rule_id, rule_name, severity, file_path, event_type, process_name, pid, "
-              "'' AS user_name, '' AS uid, expected, actual, action_taken, dingtalk_sent, recorded_at FROM alerts";
-    }
+    const AlertsColumns cols = ProbeAlertsColumns(db_);
+    std::string sql = BuildAlertsSelect(cols) + " FROM alerts";
 
     if (!rule_filter.empty() || today) {
         sql += " WHERE ";
@@ -757,10 +810,7 @@ std::vector<AlertRecord> BaselineDB::GetMonitorEvents(const std::string& start,
         ELSE replace(substr(recorded_at, 1, 19), 'T', ' ')
     END)";
 
-    std::string sql =
-        "SELECT rule_id, rule_name, severity, file_path, event_type, process_name, pid, "
-        "user_name, uid, expected, actual, action_taken, dingtalk_sent, recorded_at "
-        "FROM alerts";
+    std::string sql = BuildAlertsSelect(ProbeAlertsColumns(db_)) + " FROM alerts";
     if (!start.empty() || !end.empty()) {
         sql += " WHERE ";
         if (!start.empty()) {

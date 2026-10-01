@@ -153,6 +153,18 @@ static __always_inline int emit_attr_event(void *ctx,
     e->new_mode   = new_mode;
     e->new_uid    = new_uid;
     e->new_gid    = new_gid;
+
+    // 进程上下文：uid/gid 拆分自 bpf_get_current_uid_gid()；start_time 取
+    // 当前任务 task_struct.start_time（ns，与进程树 / 进程事件同时钟域），
+    // 用户态按 (pid, start_time) 关联进程树节点（pid 复用防护）。
+    // 注：BPF_CORE_READ 首参需左值（内部对 src 取址），先落本地指针；
+    // 取 bpf_get_current_task_btf()（proc_watch 同款，返回 task_struct*）。
+    unsigned long long uid_gid = bpf_get_current_uid_gid();
+    struct task_struct *task = bpf_get_current_task_btf();
+    e->uid        = (__u32)(uid_gid & 0xffffffff);
+    e->gid        = (__u32)(uid_gid >> 32);
+    e->start_time = BPF_CORE_READ(task, start_time);
+
     bpf_get_current_comm(e->comm, sizeof(e->comm));
 
     const unsigned char *name_ptr = BPF_CORE_READ(dentry, d_name.name);
