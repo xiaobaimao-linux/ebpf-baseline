@@ -215,9 +215,12 @@ void BaselineDB::InitTable() {
         FROM baselines;
     )SQL";
     if (sqlite3_exec(db_, copy_sql, nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        // 只读打开（如普通用户读 root 拥有的库）时迁移必然失败：降级为警告，
+        // 读路径（report/alerts/list）继续可用；库后续以可写方式打开时迁移会补跑
+        // （INSERT OR IGNORE 幂等）。不可视为致命错误，否则 CLI 直接 core dump。
         const std::string error = err_msg != nullptr ? err_msg : sqlite3_errmsg(db_);
         sqlite3_free(err_msg);
-        throw std::runtime_error("Failed to migrate legacy baselines: " + error);
+        spdlog::warn("[baseline_db] legacy baselines migration skipped: {}", error);
     }
 }
 
