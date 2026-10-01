@@ -527,6 +527,27 @@ static void FlushEventBatch(MonitorContext* mctx) {
     mctx->event_batch.clear();
 }
 
+// ── 降级路径遥测可用性提示（perf / kprobe，内核 < 5.8）────────────
+// 遥测事件通道依赖 ring buffer（5.8+），降级路径不初始化遥测；
+// 配置开关开着却无任何加载痕迹属静默缺失，此处补一行警告并列出被忽略的开关。
+static void warn_telemetry_unavailable(const Config& config) {
+    std::vector<const char*> enabled;
+    if (config.telemetry.network)   enabled.push_back("network");
+    if (config.telemetry.dns)       enabled.push_back("dns");
+    if (config.telemetry.privilege) enabled.push_back("privilege");
+    if (config.telemetry.store)     enabled.push_back("store");
+    if (enabled.empty())
+        return;
+
+    std::string names;
+    for (size_t i = 0; i < enabled.size(); ++i) {
+        if (i > 0) names += ' ';
+        names += enabled[i];
+    }
+    spdlog::warn("[telemetry] kernel <5.8 无 ring buffer，遥测不可用（perf 降级版待开发），已忽略配置: {}",
+                 names);
+}
+
 // ── 公共初始化：写入规则到 eBPF map + 基线加载 ─────────────────
 static int common_monitor_init(int fd_actions,
                                const Config& config,
@@ -1107,6 +1128,8 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
 // ══════════════════════════════════════════════════════════════════
 static int do_monitor_perf(const Config& config, AlertManager &alert_mgr,
                            const std::string& baseline_db_path, bool skip_boot_check) {
+    warn_telemetry_unavailable(config);
+
     struct lsm_file_perf_bpf *skel;
     int err;
 
@@ -1185,6 +1208,8 @@ static int do_monitor_perf(const Config& config, AlertManager &alert_mgr,
 // ══════════════════════════════════════════════════════════════════
 static int do_monitor_kprobe(const Config& config, AlertManager &alert_mgr,
                              const std::string& baseline_db_path, bool skip_boot_check) {
+    warn_telemetry_unavailable(config);
+
     struct lsm_kprobe_bpf *skel;
     int err;
 

@@ -46,6 +46,10 @@
 | sys_enter_setns | 🟡 同上（setns(2) 自 3.0 起存在） | 🟡 同上 | 🟢 原生 | 🟢 原生 |
 
 说明：
+- **v1.0 声明口径**：内核 ≥5.8 全功能（文件监控可阻断 + 遥测 network/dns/privilege/store
+  + 进程树富化）；5.7 文件监控（perf buffer，可阻断），无遥测、无水位背压；
+  5.4~5.6 文件监控（kprobe，仅告警无阻断），无遥测；4.18（RHEL8 系）为设计目标、
+  待实测（依赖 BTF backport，当前版本拒绝 <5.4 启动）；<5.4 不支持。
 - "ringbuf 降级"指事件通道从 `BPF_MAP_TYPE_RINGBUF`（5.8+）降级到 perf buffer
   （`BPF_MAP_TYPE_PERF_EVENT_ARRAY`，4.3/4.4+）。仓库已有 `bpf/lsm_file_perf.bpf.c`
   先例（`Makefile` 中 `-DUSE_PERF_BUFFER` 构建目标）；`priv_watch` / `net_watch`
@@ -163,4 +167,3 @@
   （apt 6.x 与 bundled spdlog 不兼容）、新版 `linux/bpf.h` UAPI 头（20.04 自带无
   `bpf_link_type`）、Makefile 补 `-lpthread`（glibc 2.31 不合并 pthread）。
 
-待办跟踪：遥测 perf buffer 降级版（net/priv/proc）开发后回本机复测（§4 第 4 条）。

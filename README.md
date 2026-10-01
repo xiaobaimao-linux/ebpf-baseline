@@ -58,6 +58,18 @@ sudo -u nobody id                          # → priv.setuid
 └── Makefile
 ```
 
+## 内核版本要求
+
+| 内核 | 能力 |
+|------|------|
+| ≥5.8 | 全功能：文件监控（可阻断）+ 遥测（network/dns/privilege/store）+ 进程树富化 |
+| 5.7 | 文件监控（perf buffer，可阻断）；无遥测、无水位背压 |
+| 5.4~5.6 | 文件监控（kprobe，仅告警无阻断）；无遥测 |
+| 4.18（RHEL8 系） | 设计目标，待实测（依赖 BTF backport，当前版本拒绝 <5.4 启动） |
+| <5.4 | 不支持 |
+
+遥测功能需内核 ≥5.8（ring buffer 依赖）；详见 [docs/kernel-compat-matrix.md](docs/kernel-compat-matrix.md)。
+
 ## 技术栈与环境
 
 C++17 · libbpf CO-RE（LSM BPF / kprobe / tracepoint）· yaml-cpp · SQLite（WAL）· spdlog · nlohmann/json

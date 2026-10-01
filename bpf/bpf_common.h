@@ -158,9 +158,10 @@ static __always_inline int emit_attr_event(void *ctx,
     // 当前任务 task_struct.start_time（ns，与进程树 / 进程事件同时钟域），
     // 用户态按 (pid, start_time) 关联进程树节点（pid 复用防护）。
     // 注：BPF_CORE_READ 首参需左值（内部对 src 取址），先落本地指针；
-    // 取 bpf_get_current_task_btf()（proc_watch 同款，返回 task_struct*）。
+    // 用 bpf_get_current_task()（4.8+）：btf 变体 5.11 才合入，5.4~5.10
+    // 降级路径 verifier 拒绝 unknown helper，文件监控探针必须走通用版。
     unsigned long long uid_gid = bpf_get_current_uid_gid();
-    struct task_struct *task = bpf_get_current_task_btf();
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     e->uid        = (__u32)(uid_gid & 0xffffffff);
     e->gid        = (__u32)(uid_gid >> 32);
     e->start_time = BPF_CORE_READ(task, start_time);
