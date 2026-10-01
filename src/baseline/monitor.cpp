@@ -8,6 +8,7 @@
 #include "utils.hpp"
 #include "config.hpp"
 #include "commonfun.hpp"
+#include "container.hpp"
 #include "baseline_db.hpp"
 #include "event_bus.hpp"
 #include "event_record.hpp"
@@ -518,11 +519,27 @@ static void process_event_core(struct event* e, MonitorContext* mctx,
     }
 }
 
+// ── perf 降级路径（5.7/5.4）操作者上下文：无进程树/消费线程，按事件 uid/gid +
+// /proc 尽力组装（exe/container 依赖 /proc/<pid>，进程已退出则留空、字段省略），
+// 使降级路径告警同样携带操作者上下文；不报错不崩溃。
+static FileActorContext build_file_actor_fallback(const struct event& e) {
+    FileActorContext actor;
+    actor.uid = e.uid;
+    actor.gid = e.gid;
+    if (struct passwd* pw = getpwuid(static_cast<uid_t>(e.uid)))
+        actor.user_name = pw->pw_name;
+    actor.exe = exe_path_of(static_cast<int>(e.pid));
+    actor.container_id = container_id_of(static_cast<int>(e.pid));
+    return actor;
+}
+
 // ── 批量处理：遍历缓冲区中的所有事件，逐条调用核心处理逻辑 ────────
-// perf buffer 路径（5.7 / 5.4）无进程树上下文，actor 传 nullptr 走原兜底。
+// perf buffer 路径（5.7 / 5.4）无进程树：按事件 uid/gid + /proc 尽力组装
+// 操作者上下文（build_file_actor_fallback），告警同样富化。
 static void FlushEventBatch(MonitorContext* mctx) {
     for (auto& e : mctx->event_batch) {
-        process_event_core(&e, mctx, nullptr);
+        FileActorContext actor = build_file_actor_fallback(e);
+        process_event_core(&e, mctx, &actor);
     }
     mctx->event_batch.clear();
 }
@@ -719,9 +736,87 @@ static FileActorContext build_file_actor(const struct event& e, TelemetryRuntime
     return actor;
 }
 
+// ── 文件事件落库渲染（M0-1：CAT_FILE 对齐标准路径）────────────────
+static const char* file_event_kind(const struct event& e) {
+    switch (e.event_type) {
+    case EVENT_CHMOD:  return "file.chmod";
+    case EVENT_CHOWN:  return "file.chown";
+    case EVENT_UNLINK: return "file.unlink";
+    case EVENT_RENAME: return "file.rename";
+    case EVENT_MMAP:   return "file.mmap";
+    default:
+        if ((e.mask & EVENT_WRITE) != 0) return "file.write";
+        if ((e.mask & EVENT_READ)  != 0) return "file.read";
+        return "file.access";
+    }
+}
+
+// 文件事件路径解析：优先基线完整路径（--db 模式，不跟随 symlink），
+// 其次 YAML 规则路径；均无退回事件自带文件名（仅 basename）。
+static std::string file_event_path(const struct event& e) {
+    auto it_bl = g_inode_to_baseline.find(e.ino);
+    if (it_bl != g_inode_to_baseline.end())
+        return it_bl->second.file_path;
+    auto it_path = g_inode_to_path.find(e.ino);
+    if (it_path != g_inode_to_path.end())
+        return it_path->second;
+    return std::string(e.path);
+}
+
+// struct event -> JSON（file.write/chmod/... 形状同 net/priv 渲染），
+// 同时回填 rec.uid/ppid/exe/container_id 供 events 表索引列；
+// actor 为空（proc_watch 未启动）时 uid/gid 退回事件值、exe/container 省略。
+static void render_file_event(const struct event& e, struct EventRecord& rec, json& out,
+                              const FileActorContext* actor) {
+    out["event_type"] = file_event_kind(e);
+    out["ts"]         = rec.ts_ns;
+
+    json file;
+    file["path"]   = file_event_path(e);
+    file["ino"]    = e.ino;
+    file["mask"]   = e.mask;
+    file["action"] = actionToString(static_cast<Action>(e.action));
+    if (e.event_type == EVENT_CHMOD)
+        file["new_mode"] = mode_to_string(e.new_mode & 0777);
+    if (e.event_type == EVENT_CHOWN) {
+        file["new_uid"] = e.new_uid;
+        file["new_gid"] = e.new_gid;
+    }
+    out["file"] = file;
+
+    json proc;
+    proc["pid"]  = e.pid;
+    proc["uid"]  = (actor != nullptr) ? actor->uid : e.uid;
+    proc["gid"]  = (actor != nullptr) ? actor->gid : e.gid;
+    std::string comm(reinterpret_cast<const char*>(e.comm), sizeof(e.comm));
+    auto comm_end = comm.find('\0');
+    if (comm_end != std::string::npos) comm.resize(comm_end);
+    proc["comm"] = comm;
+    if (actor != nullptr && actor->ppid > 0)
+        proc["ppid"] = actor->ppid;
+    if (actor != nullptr && !actor->exe.empty())
+        proc["exe"] = actor->exe;
+    out["process"] = proc;
+
+    if (actor != nullptr && !actor->container_id.empty()) {
+        json c;
+        c["container_id"] = actor->container_id;
+        out["container"] = c;
+    }
+
+    rec.uid  = (actor != nullptr) ? actor->uid : e.uid;
+    rec.ppid = (actor != nullptr) ? actor->ppid : 0;
+    if (actor != nullptr) {
+        record_set_str(rec.exe, sizeof(rec.exe), actor->exe.c_str(), actor->exe.size());
+        record_set_str(rec.container_id, sizeof(rec.container_id),
+                       actor->container_id.c_str(), actor->container_id.size());
+    }
+}
+
 // 路由单条事件：file→查进程树拼进程上下文后回原处理函数（告警富化 exe/
-// container_id/ancestors，树关闭时行为与现状一致）、process→先更新进程树
-// （exec 另落库）、network/dns/priv/ns→渲染 JSON 走原日志输出（行为零变化），
+// container_id/ancestors，树关闭时行为与现状一致；store 开启时渲染 JSON、
+// 富化祖先链并落库）、process→先更新进程树（exec 另落库）、
+// network/dns/priv/ns→渲染 JSON 走原日志输出（行为零变化），
 // store 开启时富化祖先链并落库。
 static void route_event(EventRecord& rec, TelemetryRuntime* rt) {
     // 排队延迟：dequeue 时间 - 入队时间
@@ -742,6 +837,18 @@ static void route_event(EventRecord& rec, TelemetryRuntime* rt) {
             actor_ptr = &actor;
         }
         process_event_core(&fe, rt->mctx, actor_ptr);
+        if (rt->store_on) {
+            // 读/写（file_permission）事件 event_type=0，按 mask 归一 action 便于检索
+            if (fe.event_type == 0)
+                rec.action = (fe.mask & EVENT_WRITE) ? EVENT_WRITE : EVENT_READ;
+            json j;
+            render_file_event(fe, rec, j, actor_ptr);
+            rt->enricher->enrich(rec, j);
+            const std::string payload = j.dump();
+            record_set_str(rec.payload_json, sizeof(rec.payload_json),
+                           payload.c_str(), payload.size());
+            rt->store->Append(rec);
+        }
         break;
     }
     case CAT_PROCESS: {

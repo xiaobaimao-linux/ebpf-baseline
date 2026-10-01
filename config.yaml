@@ -6,7 +6,7 @@ telemetry:
   network: true        # connect/accept/bind 网络连接遥测
   dns: true            # DNS 查询遥测（随 net_watch 加载）
   privilege: true      # setuid/capset/ptrace/module_load/mount 权限遥测
-  store: true          # 事件落库 events 表（exec/network/dns/priv）
+  store: true          # 事件落库 events 表（file/exec/network/dns/priv）
   events_db: "events.db"
   batch_size: 500      # 一事务批量条数
   batch_ms: 200        # 批量 flush 间隔（毫秒）

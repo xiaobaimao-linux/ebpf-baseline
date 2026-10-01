@@ -191,6 +191,7 @@ tr:hover{background:#f6f8fa}
 <th>事件类型</th>
 <th>进程/PID</th>
 <th>用户/UID</th>
+<th>操作者</th>
 <th>预期→实际</th>
 <th>动作</th>
 </tr>
@@ -208,6 +209,23 @@ tr:hover{background:#f6f8fa}
                                     " (pid=" + (r.pid > 0 ? std::to_string(r.pid) : "-") + ")";
         const std::string user = EscapeHtml(r.user_name.empty() ? "-" : r.user_name) +
                                  " (uid=" + EscapeHtml(r.uid.empty() ? "-" : r.uid) + ")";
+        // 操作者上下文（M0-1）：exe [容器ID] (祖先N层)；老库记录为空显示 "-"
+        std::string operator_info = "-";
+        if (!r.exe.empty() || !r.container_id.empty() || !r.ancestors.empty()) {
+            operator_info = r.exe.empty() ? EscapeHtml(r.process_name) : EscapeHtml(r.exe);
+            if (!r.container_id.empty())
+                operator_info += " [" + EscapeHtml(r.container_id) + "]";
+            if (!r.ancestors.empty()) {
+                size_t layers = 0;
+                size_t pos = 0;
+                while ((pos = r.ancestors.find("\"pid\"", pos)) != std::string::npos) {
+                    ++layers;
+                    pos += 5;
+                }
+                if (layers > 0)
+                    operator_info += " (祖先" + std::to_string(layers) + "层)";
+            }
+        }
 
         fs << "<tr>\n";
         fs << "<td>" << EscapeHtml(timestamp) << "</td>\n";
@@ -218,6 +236,7 @@ tr:hover{background:#f6f8fa}
         fs << "<td>" << EscapeHtml(r.event_type.empty() ? "-" : r.event_type) << "</td>\n";
         fs << "<td>" << process << "</td>\n";
         fs << "<td>" << user << "</td>\n";
+        fs << "<td>" << operator_info << "</td>\n";
         fs << "<td>" << details << "</td>\n";
         fs << "<td>" << EscapeHtml(r.action_taken.empty() ? "-" : r.action_taken) << "</td>\n";
         fs << "</tr>\n";
