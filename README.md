@@ -1,5 +1,10 @@
 # 谛听（Diting）
-**基于 eBPF 的 Linux 主机安全监控 Agent：内核级文件完整性监控（FIM）+ 全量运行时遥测**
+**基于 eBPF 的 Linux 主机安全监控 Agent：内核级文件完整性监控（FIM）+ 全量运行时遥测 + AI 工作负载防护**
+
+> eBPF-based Linux host security agent: File Integrity Monitoring (FIM),
+> full runtime telemetry (process / network / privilege / namespace events),
+> GPU & AI workload protection for private LLM clusters — near-zero overhead,
+> event-driven, MITRE ATT&CK mapped.
 
 适配等保2.0、服务器运维、工控、容器安全、云主机与 AI 工作负载防护场景。
 项目正从「eBPF LSM FIM 工具」演进为「云安全与 AI 安全监控 Agent」。
