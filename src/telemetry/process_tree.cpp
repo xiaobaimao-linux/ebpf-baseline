@@ -38,8 +38,16 @@ bool read_proc_stat(int pid, std::string* comm, unsigned int* ppid,
     if (!in.is_open())
         return false;
 
-    std::string content((std::istreambuf_iterator<char>(in)),
-                        std::istreambuf_iterator<char>());
+    // /proc/<pid>/stat 读取与进程退出存在竞态：打开成功（进程活着）后进程退出，
+    // libstdc++ 的 basic_filebuf::underflow 遇 ESRCH 直接抛 ios_failure，
+    // 必须兜底，否则异常穿透导致 monitor 进程 terminate
+    std::string content;
+    try {
+        content.assign(std::istreambuf_iterator<char>(in),
+                       std::istreambuf_iterator<char>());
+    } catch (const std::ios_base::failure&) {
+        return false;
+    }
     const size_t lparen = content.find('(');
     const size_t rparen = content.rfind(')');
     if (lparen == std::string::npos || rparen == std::string::npos || rparen < lparen)
@@ -81,23 +89,28 @@ bool read_proc_status_ids(int pid, unsigned int* uid, unsigned int* gid) {
     if (!in.is_open())
         return false;
 
+    // 同 read_proc_stat：打开后进程退出，getline 遇 ESRCH 抛 ios_failure，兜底
     bool got_uid = false, got_gid = false;
     std::string line;
-    while (std::getline(in, line)) {
-        std::istringstream iss(line);
-        std::string key;
-        unsigned long value = 0;
-        if (line.rfind("Uid:", 0) == 0) {
-            iss >> key >> value;
-            *uid = static_cast<unsigned int>(value);
-            got_uid = true;
-        } else if (line.rfind("Gid:", 0) == 0) {
-            iss >> key >> value;
-            *gid = static_cast<unsigned int>(value);
-            got_gid = true;
+    try {
+        while (std::getline(in, line)) {
+            std::istringstream iss(line);
+            std::string key;
+            unsigned long value = 0;
+            if (line.rfind("Uid:", 0) == 0) {
+                iss >> key >> value;
+                *uid = static_cast<unsigned int>(value);
+                got_uid = true;
+            } else if (line.rfind("Gid:", 0) == 0) {
+                iss >> key >> value;
+                *gid = static_cast<unsigned int>(value);
+                got_gid = true;
+            }
+            if (got_uid && got_gid)
+                break;
         }
-        if (got_uid && got_gid)
-            break;
+    } catch (const std::ios_base::failure&) {
+        return false;
     }
     return got_uid || got_gid;
 }
