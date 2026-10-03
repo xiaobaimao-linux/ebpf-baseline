@@ -83,6 +83,21 @@ struct AlertRecord {
     std::string ancestors;      // 祖先链 JSON 数组串（M0-1，老库为空串）
 };
 
+// M1-2 资产清点记录（assets 表）
+struct AssetRecord {
+    std::int64_t id = 0;
+    std::string asset_type;   // package / port / process / autostart / cron
+    std::string name;         // 稳定键（包名 / proto://addr:port / comm(pid) / unit名 / 文件::条目）
+    std::string detail_json;  // 类型相关扩展字段
+    std::string first_seen;   // ISO 8601（与 recorded_at 同格式）
+    std::string last_seen;
+};
+
+struct AssetUpsertResult {
+    int inserted = 0;
+    int updated = 0;
+};
+
 class BaselineDB {
 public:
     explicit BaselineDB(const std::string& db_path = "/var/lib/baseline-guard/baseline.db");
@@ -128,6 +143,16 @@ public:
     void Vacuum();
     // === 获取当前告警总数 ===
     int GetAlertCount();
+
+    // === M1-2 资产清点 ===
+    // 批量 upsert（单事务）：同 (asset_type, name) 已存在则刷新 detail_json/last_seen，
+    // 否则插入新行；批次内重复 name 保留首条。为后续资产变更 diff 保留 first_seen。
+    AssetUpsertResult UpsertAssets(const std::vector<AssetRecord>& assets);
+    // 按类型统计资产行数（asset_type 为空串表示全部）
+    std::int64_t CountAssets(const std::string& asset_type);
+    // 按类型查询资产，asset_type 为空串表示全部；limit<=0 表示不限制
+    std::vector<AssetRecord> GetAssets(const std::string& asset_type, std::int64_t limit,
+                                       std::int64_t offset);
 
     // 查询基线
     BaselineRecord GetBaseline(const std::string& file_path);

@@ -1,4 +1,6 @@
 #include "alert_manager.hpp"
+#include "asset_collect.hpp"
+#include "asset_list.hpp"
 #include "baseline.hpp"
 #include "baseline_check.hpp"
 #include "baseline_clean.hpp"
@@ -201,6 +203,23 @@ int main(int argc, char *argv[]) {
         return RunStats(argc - 2, argv + 2);
     }
 
+    // asset collect / list 子命令（M1-2）：独立于 config，使用独立参数解析
+    if (argc >= 2 && std::string(argv[1]) == "asset") {
+        if (argc < 3) {
+            fprintf(stderr, "Error: asset subcommand required (collect, list)\n");
+            return 2;
+        }
+        const std::string subcmd = argv[2];
+        if (subcmd == "collect") {
+            return RunAssetCollect(argc - 3, argv + 3);
+        } else if (subcmd == "list") {
+            return RunAssetList(argc - 3, argv + 3);
+        } else {
+            fprintf(stderr, "Error: unknown asset subcommand: %s\n", subcmd.c_str());
+            return 2;
+        }
+    }
+
     // 设置全局日志级别（默认是 info，低于它的 debug/trace 不会输出）
     spdlog::set_level(spdlog::level::debug);
 
@@ -243,6 +262,8 @@ int main(int argc, char *argv[]) {
             printf("  baseline clean        clean orphan baseline entries\n");
             printf("  alerts                show alert history from SQLite\n");
             printf("  report                export monitor events to HTML\n");
+            printf("  asset collect         collect host assets into SQLite\n");
+            printf("  asset list            list host assets (--type/--json)\n");
             printf("  stats --drop          show eBPF ring buffer drop statistics\n");
             return 0;
         } else if (arg == "-C" || arg == "--check") {
