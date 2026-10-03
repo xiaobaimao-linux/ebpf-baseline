@@ -58,8 +58,13 @@ unsigned char stringToSeverity(const std::string& s);
 // 将 severity 数值转为字符串
 std::string severityToString(unsigned char sev);
 
-// 解析 YAML 文件，返回完整配置对象
+// 解析 YAML 文件，返回完整配置对象（lenient：坏规则跳过并告警，供 check 等命令使用）
 Config parseYamlFile(const string& filename);
+
+// 严格解析：任何规则/whitelist 解析失败（缩进/类型错）即整体失败，
+// err 携带 "文件:行号: 原因"。供 monitor 冷启动与 SIGHUP 热加载使用，
+// 热加载失败时调用方保留旧配置。
+bool tryParseYamlFile(const string& filename, Config& out, string& err);
 
 // 打印规则列表（调试用）
 void printRules(const vector<Rule>& rules);

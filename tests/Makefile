@@ -17,13 +17,14 @@ CONFIG_SRCS = $(SRC_DIR)/cli/config.cpp $(SRC_DIR)/common/utils.cpp
 all: unit integration
 
 # ====== 单元测试 ======
-unit: test_config test_utils test_watermark test_event_bus test_process_tree
+unit: test_config test_utils test_watermark test_event_bus test_process_tree test_whitelist
 	@echo "=== Running unit tests ==="
 	./test_config
 	./test_utils
 	./test_watermark
 	./test_event_bus
 	./test_process_tree
+	./test_whitelist
 
 test_config: unit/test_config.cpp $(CONFIG_SRCS)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(CONFIG_SRCS) $(LDFLAGS_COMMON) $(LDFLAGS_SSL)
@@ -39,6 +40,9 @@ test_event_bus: unit/test_event_bus.cpp $(SRC_DIR)/telemetry/event_bus.cpp
 
 test_process_tree: unit/test_process_tree.cpp $(SRC_DIR)/telemetry/process_tree.cpp $(SRC_DIR)/common/container.cpp
 	$(CXX) $(CXXFLAGS) -I$(SRC_DIR)/telemetry -o $@ $< $(SRC_DIR)/telemetry/process_tree.cpp $(SRC_DIR)/common/container.cpp $(LDFLAGS_COMMON)
+
+test_whitelist: unit/test_whitelist.cpp $(SRC_DIR)/baseline/whitelist.cpp $(SRC_DIR)/common/container.cpp $(CONFIG_SRCS)
+	$(CXX) $(CXXFLAGS) -o $@ $< $(SRC_DIR)/baseline/whitelist.cpp $(SRC_DIR)/common/container.cpp $(CONFIG_SRCS) $(LDFLAGS_COMMON) $(LDFLAGS_SSL)
 
 # ====== 集成测试 ======
 integration:

@@ -440,7 +440,12 @@ int main(int argc, char *argv[]) {
                         spdlog::error("[config_error] only yaml/yml config is supported now: {}", config_path);
                         return 1;
                     }
-                    config = parseYamlFile(config_path);
+                    // M0-2：冷启动严格解析（坏配置带行号报错退出，不给空规则运行）
+                    std::string parse_err;
+                    if (!tryParseYamlFile(config_path, config, parse_err)) {
+                        spdlog::error("[config_error] {}", parse_err);
+                        return 1;
+                    }
                     compute_inodes(config);
                     spdlog::info("[rules_loaded] config={}, rules={}", config_path, config.rules.size());
                 }
@@ -459,7 +464,7 @@ int main(int argc, char *argv[]) {
                 signal(SIGHUP, sighup_handler);
                 int ret = 0;
                 while (true) {
-                    ret = do_monitor(config, alert_mgr, monitor_db_path, skip_boot_check);
+                    ret = do_monitor(config, alert_mgr, config_path, monitor_db_path, skip_boot_check);
                     if (!g_reload) {
                         break;
                     }
@@ -532,22 +537,36 @@ int main(int argc, char *argv[]) {
         spdlog::info("[service_stop] check mode finished, exit_code={}", ret);
         return ret;
     } else if (cmd == "monitor") {
+        // M0-2：冷启动严格解析（坏配置带行号报错退出，不给空规则运行）；
+        // check 等命令仍走上方 lenient 解析，行为不变
+        std::string parse_err;
+        if (!tryParseYamlFile(config_path, config, parse_err)) {
+            spdlog::error("[config_error] {}", parse_err);
+            return 1;
+        }
+        compute_inodes(config);
+        spdlog::info("[rules_loaded] config={}, rules={}", config_path, config.rules.size());
+
         signal(SIGHUP, sighup_handler);
         spdlog::info("[service_start] monitor mode started");
 
         int ret = 0;
         while (true) {
-            ret = do_monitor(config, alert_mgr);
+            ret = do_monitor(config, alert_mgr, config_path);
             if (!g_reload) {
                 break;
             }
             g_reload = false;
             spdlog::info("[rules_reload] SIGHUP received, reloading config from {}", config_path);
 
-            config = parseYamlFile(config_path);
-            compute_inodes(config);
-
-            spdlog::info("[rules_reload] config reloaded, rules={}", config.rules.size());
+            Config reloaded;
+            if (tryParseYamlFile(config_path, reloaded, parse_err)) {
+                config = std::move(reloaded);
+                compute_inodes(config);
+                spdlog::info("[rules_reload] config reloaded, rules={}", config.rules.size());
+            } else {
+                spdlog::error("[rules_reload] 失败，保留旧配置: {}", parse_err);
+            }
         }
 
         spdlog::info("[service_stop] monitor mode stopped, exit_code={}", ret);

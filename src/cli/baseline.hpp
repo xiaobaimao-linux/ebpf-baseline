@@ -15,6 +15,14 @@ enum class Action {
     UNKNOWN = -1
 };
 
+// 进程白名单条目（rule.whitelist 列表元素）：
+// exe 精确匹配 /proc/<pid>/exe 路径；parent_chain 为祖先 exe 路径列表（任一命中即可）。
+// 条目内 AND（exe 相等 且 祖先条件满足），条目间 OR。
+struct WhitelistEntry {
+    std::string exe;
+    std::vector<std::string> parent_chain;
+};
+
 struct Rule {
     std::string id;
     unsigned char severity = SEVERITY_MEDIUM;  // SEVERITY_LOW(0) ~ SEVERITY_CRITICAL(3)
@@ -44,5 +52,8 @@ struct Rule {
     bool monitor_delete = false;
     bool monitor_chmod = false;
     bool monitor_chown = false;
+
+    // 进程白名单（可选）：命中则抑制该 rule 的 file 告警
+    std::vector<WhitelistEntry> whitelist;
 };
 

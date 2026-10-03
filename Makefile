@@ -83,6 +83,7 @@ MONITOR_SRC = src/baseline/monitor.cpp \
               src/baseline/monitor_privilege.cpp \
               src/baseline/monitor_process.cpp \
               src/baseline/watermark_backpressure.cpp \
+              src/baseline/whitelist.cpp \
               src/telemetry/event_bus.cpp \
               src/telemetry/process_tree.cpp \
               src/telemetry/enricher.cpp
@@ -191,6 +192,17 @@ pipe_flood: $(PIPE_FLOOD_BIN)
 
 $(PIPE_FLOOD_BIN): $(PIPE_FLOOD_SRCS)
 	$(CXX) -std=c++17 -Wall -Wextra -g $(INCLUDE_DIRS) -o $@ $(PIPE_FLOOD_SRCS) -lsqlite3 -lfmt -lpthread
+
+# 白名单集成测试 helper：wl_writer（直接写文件）与 wl_parent（fork+exec wl_writer）
+WL_HELPERS = tests/integration/helpers/wl_writer tests/integration/helpers/wl_parent
+
+wl_helpers: $(WL_HELPERS)
+
+tests/integration/helpers/wl_writer: tests/integration/helpers/wl_writer.c
+	$(CC) -O2 -Wall -o $@ $<
+
+tests/integration/helpers/wl_parent: tests/integration/helpers/wl_parent.c
+	$(CC) -O2 -Wall -o $@ $<
 
 clean:
 	find src -type f \( -name '*.o' -o -name '*.d' \) -delete

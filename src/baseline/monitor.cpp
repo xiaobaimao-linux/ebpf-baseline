@@ -18,6 +18,7 @@
 #include "net_event.h"
 #include "priv_event.h"
 #include "proc_event.h"
+#include "whitelist.hpp"
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -29,6 +30,7 @@
 #include <linux/types.h>
 #include <nlohmann/json.hpp>
 #include <pwd.h>
+#include <shared_mutex>
 #include <spdlog/spdlog.h>
 #include <sys/epoll.h>
 #include <sys/stat.h>
@@ -120,32 +122,75 @@ static std::string ResolveUserInfoByPid(int pid, std::string& uid) {
     return user_name;
 }
 
-// 全局映射（或封装到类）
-std::unordered_map<unsigned long, Rule> g_inode_to_rule;
-std::unordered_map<unsigned long, std::string> g_inode_to_path;
-std::unordered_map<unsigned long, std::string> g_inode_to_hash;
+// ── 规则表快照与热加载（M0-2）────────────────────────────────────
+// FileRuleTable 为整代不可变快照：SIGHUP 热加载在写锁内整体替换；
+// 事件处理（消费线程 / perf 主循环）持读锁访问，锁内 Rule 引用恒有效。
+struct FileRuleTable {
+    std::unordered_map<unsigned long, Rule> inode_to_rule;
+    std::unordered_map<unsigned long, std::string> inode_to_path;
+    std::unordered_map<unsigned long, std::string> inode_to_hash;
 
-// 基线实时监控映射：inode -> CheckEntry（仅当 --db 模式下非空）
+    static std::shared_ptr<FileRuleTable> Build(const Config& config) {
+        auto t = std::make_shared<FileRuleTable>();
+        for (const auto& rule : config.rules) {
+            if (!rule.has_monitor)
+                continue;
+            if (rule.monitor_path.empty())
+                continue;
+            if (rule.ino == 0)
+                continue;
+            t->inode_to_rule[rule.ino] = rule;
+            t->inode_to_path[rule.ino] = rule.monitor_path;
+            if (!rule.check_hash.empty())
+                t->inode_to_hash[rule.ino] = rule.check_hash;
+        }
+        return t;
+    }
+};
+
+static std::shared_ptr<FileRuleTable> g_file_rules = std::make_shared<FileRuleTable>();
+// 白名单不可变快照，与规则表同锁替换：读侧持锁取 const 引用，匹配无锁读表
+static std::shared_ptr<const WhitelistTable> g_whitelist_table =
+    std::make_shared<const WhitelistTable>();
+static std::shared_mutex g_file_rules_mtx;
+static WhitelistMatcher g_whitelist_matcher;
+
+// 基线实时监控映射：inode -> CheckEntry（仅当 --db 模式下非空；启动时构建，热加载不变更）
 std::unordered_map<unsigned long, CheckEntry> g_inode_to_baseline;
 
-// 初始化映射
-void init_inode_maps(const Config &config) {
-    g_inode_to_rule.clear();
-    g_inode_to_path.clear();
-    g_inode_to_hash.clear();
+// ── SIGHUP 热加载 ─────────────────────────────────────────────
+// handler 只置标志；主事件循环每轮检查发现置位即重解析配置：
+// 成功原子替换规则表与白名单快照并清缓存，失败保留旧配置
+static volatile sig_atomic_t g_sighup_pending = 0;
 
-    for (const auto &rule : config.rules) {
-        if (!rule.has_monitor)
-            continue;
-        if (rule.monitor_path.empty())
-            continue;
-        if (rule.ino == 0)
-            continue;
-        g_inode_to_rule[rule.ino] = rule;
-        g_inode_to_path[rule.ino] = rule.monitor_path;
-        if (!rule.check_hash.empty()) {
-            g_inode_to_hash[rule.ino] = rule.check_hash;
-        }
+static void monitor_sighup_handler(int) {
+    g_sighup_pending = 1;
+}
+
+static void reload_monitor_config(const std::string& config_path) {
+    Config new_config;
+    std::string err;
+    if (!tryParseYamlFile(config_path, new_config, err)) {
+        spdlog::error("[config_reload] 失败，保留旧配置: {}", err);
+        return;
+    }
+    compute_inodes(new_config);
+    auto new_rules = FileRuleTable::Build(new_config);
+    auto new_wl = WhitelistTable::Build(new_config);
+    {
+        std::unique_lock<std::shared_mutex> lk(g_file_rules_mtx);
+        g_file_rules = std::move(new_rules);
+        g_whitelist_table = std::move(new_wl);
+    }
+    g_whitelist_matcher.ClearCache();
+    spdlog::info("config reloaded ({} rules)", new_config.rules.size());
+}
+
+// 60s 周期：各 rule 白名单抑制计数增量打一行 info（无增量不打）
+static void log_suppressed_stats() {
+    for (const auto& [rule_id, n] : g_whitelist_matcher.GetAndResetSuppressed()) {
+        if (n > 0)
+            spdlog::info("[whitelist] suppressed: rule={} count={}", rule_id, n);
     }
 }
 
@@ -358,6 +403,19 @@ struct MonitorContext {
     size_t                   dropped_count = 0;
 };
 
+// ── 白名单匹配：从 FileActorContext.ancestors JSON 还原祖先 exe 链 ──
+// ancestors 为 [{pid,comm,exe}] 自近及远 ≤8 层（Enricher::ancestors_of 产物）
+static std::vector<std::string> actor_ancestor_exes(const json& ancestors) {
+    std::vector<std::string> out;
+    if (ancestors.is_array()) {
+        for (const auto& a : ancestors) {
+            if (a.contains("exe") && a["exe"].is_string())
+                out.push_back(a["exe"].get<std::string>());
+        }
+    }
+    return out;
+}
+
 // ── 核心事件处理逻辑（前向声明）─────────────────────────────────────
 // actor 非空时为消费线程按 (pid, start_time) 查进程树组装的进程上下文，
 // 用于告警富化（user_name/uid/exe/container_id/ancestors）；为空走原兜底。
@@ -435,13 +493,43 @@ static void process_event_core(struct event* e, MonitorContext* mctx,
         }
     }
 
-    // ── 原有 YAML 规则匹配逻辑（不变）──────────────────────────────
-    auto it_rule = g_inode_to_rule.find(e->ino);
-    if (it_rule != g_inode_to_rule.end()) {
+    // ── 原有 YAML 规则匹配逻辑（不变；M0-2 加白名单抑制决策点）──────
+    // 持读锁保证热加载（写锁整体替换快照）期间 Rule/路径引用恒有效
+    {
+    std::shared_lock<std::shared_mutex> rules_lock(g_file_rules_mtx);
+    const auto file_rules = g_file_rules;
+    auto it_rule = file_rules->inode_to_rule.find(e->ino);
+    if (it_rule != file_rules->inode_to_rule.end()) {
         const Rule &rule = it_rule->second;
 
-        auto it_path = g_inode_to_path.find(e->ino);
-        if (it_path != g_inode_to_path.end()) {
+        auto it_path = file_rules->inode_to_path.find(e->ino);
+
+        // 白名单抑制（M0-2）：命中则计数 + debug 留痕（rule/pid/exe/path），
+        // 跳过本规则全部告警；未命中及 fail-closed 场景走原有告警流程，行为零变化。
+        // exe/祖先优先用进程树 exec 时捕获的 actor（短寿进程 /proc 已回收，树数据
+        // 更及时且与 /proc 等价）；actor 无 exe 退回 /proc 解析（fail-closed）
+        if (!g_whitelist_table->empty()) {
+            std::string exe;
+            bool suppressed;
+            if (actor != nullptr && !actor->exe.empty()) {
+                suppressed = g_whitelist_matcher.Match(*g_whitelist_table, rule,
+                                                       e->pid, e->start_time, actor->exe,
+                                                       actor_ancestor_exes(actor->ancestors),
+                                                       &exe);
+            } else {
+                suppressed = g_whitelist_matcher.Match(*g_whitelist_table, rule, e->pid,
+                                                       &exe);
+            }
+            if (suppressed) {
+                spdlog::debug("[whitelist] suppressed: rule={} pid={} exe={} path={}",
+                              rule.id, e->pid, exe,
+                              it_path != file_rules->inode_to_path.end() ? it_path->second
+                                                                         : std::string("?"));
+                return;
+            }
+        }
+
+        if (it_path != file_rules->inode_to_path.end()) {
             const std::string &path = it_path->second;
 
             const std::string actual_event = ((e->mask & EVENT_READ) != 0) ? "read" : "write";
@@ -455,8 +543,8 @@ static void process_event_core(struct event* e, MonitorContext* mctx,
             }
         }
 
-        auto it_hash = g_inode_to_hash.find(e->ino);
-        if (it_hash != g_inode_to_hash.end()) {
+        auto it_hash = file_rules->inode_to_hash.find(e->ino);
+        if (it_hash != file_rules->inode_to_hash.end()) {
             const std::string &expected_hash = it_hash->second;
             // 文件可能在读取瞬间被删除（如 unlink 事件后），compute_sha256
             // 抛异常时跳过本次哈希检查，避免异常穿透终止 monitor
@@ -481,12 +569,13 @@ static void process_event_core(struct event* e, MonitorContext* mctx,
         } else {
             std::ostringstream oss;
             oss << "[" << actionToString(static_cast<Action>(e->action)) << "] File access detected (no hash baseline)\n"
-                << "  path: " << (it_path != g_inode_to_path.end() ? it_path->second : "unknown") << "\n"
+                << "  path: " << (it_path != file_rules->inode_to_path.end() ? it_path->second : "unknown") << "\n"
                 << "  pid: " << e->pid << "\n"
                 << "  comm: " << e->comm << std::endl;
             spdlog::warn(oss.str());
             spdlog::default_logger()->flush();
         }
+    }
     }
 
     // ── 基线实时比对（--db 模式下）────────────────────────────────
@@ -598,7 +687,13 @@ static int common_monitor_init(int fd_actions,
         bpf_map_update_elem(fd_actions, &key, &value, BPF_ANY);
     }
 
-    init_inode_maps(config);
+    // 安装规则表 + 白名单快照（启动代；SIGHUP 热加载时整代替换）
+    {
+        std::unique_lock<std::shared_mutex> lk(g_file_rules_mtx);
+        g_file_rules = FileRuleTable::Build(config);
+        g_whitelist_table = WhitelistTable::Build(config);
+    }
+    g_whitelist_matcher.ClearCache();
 
     // ── 基线实时监控初始化（仅当 --db 模式下）────────────────
     baseline_db_out = nullptr;
@@ -619,7 +714,7 @@ static int common_monitor_init(int fd_actions,
 
             int baseline_registered = 0;
             for (const auto& [ino, entry] : g_inode_to_baseline) {
-                if (g_inode_to_rule.find(ino) == g_inode_to_rule.end()) {
+                if (g_file_rules->inode_to_rule.find(ino) == g_file_rules->inode_to_rule.end()) {
                     struct monitor_rule value{};
                     value.action = ACTION_ALERT;
                     // 基线完整性关注内容读写 + 权限/属主变更（perm_changed 风险类型）
@@ -663,9 +758,11 @@ static int common_monitor_init(int fd_actions,
 // ── 公共监控循环（perf buffer 路径，5.7 和 5.4 共用）──────────
 static int run_perf_buffer_loop(struct perf_buffer *pb,
                                 MonitorContext& mctx,
-                                AlertManager& alert_mgr) {
+                                AlertManager& alert_mgr,
+                                const std::string& config_path) {
     int count = 0;
     const int RETENTION_INTERVAL = 36000;
+    const int WL_STATS_INTERVAL = 600;   // 100ms 轮询 × 600 = 60s 抑制计数日志
 
     while (running) {
         count++;
@@ -675,11 +772,20 @@ static int run_perf_buffer_loop(struct perf_buffer *pb,
             break;
         }
 
+        // SIGHUP 热加载：handler 只置标志，此处每轮检查（成功替换快照，失败保留旧配置）
+        if (g_sighup_pending) {
+            g_sighup_pending = 0;
+            reload_monitor_config(config_path);
+        }
+
         FlushEventBatch(&mctx);
 
         if (count % RETENTION_INTERVAL == 0) {
             int deleted = alert_mgr.RunRetention();
             (void)deleted;
+        }
+        if (count % WL_STATS_INTERVAL == 0) {
+            log_suppressed_stats();
         }
     }
 
@@ -757,8 +863,9 @@ static std::string file_event_path(const struct event& e) {
     auto it_bl = g_inode_to_baseline.find(e.ino);
     if (it_bl != g_inode_to_baseline.end())
         return it_bl->second.file_path;
-    auto it_path = g_inode_to_path.find(e.ino);
-    if (it_path != g_inode_to_path.end())
+    std::shared_lock<std::shared_mutex> rules_lock(g_file_rules_mtx);
+    auto it_path = g_file_rules->inode_to_path.find(e.ino);
+    if (it_path != g_file_rules->inode_to_path.end())
         return it_path->second;
     return std::string(e.path);
 }
@@ -914,6 +1021,7 @@ static void telemetry_consumer_main(TelemetryRuntime* rt) {
     unsigned long long last_drop      = now_monotonic_ns();
     unsigned long long last_sweep     = now_monotonic_ns();
     unsigned long long last_retention = now_monotonic_ns();
+    unsigned long long last_wl_stats  = now_monotonic_ns();
     unsigned long long last_drop_total = rt->bus->drop_count_total();
 
     while (*rt->running) {
@@ -947,6 +1055,12 @@ static void telemetry_consumer_main(TelemetryRuntime* rt) {
                 }
             }
             last_stats = now;
+        }
+
+        // 白名单抑制计数：每 60s 打增量（无增量不打）
+        if (now - last_wl_stats >= 60000000000ULL) {
+            log_suppressed_stats();
+            last_wl_stats = now;
         }
 
         // drop 计数：每 30s 有增量打一行
@@ -997,6 +1111,7 @@ static void telemetry_consumer_main(TelemetryRuntime* rt) {
 // 路径 A：内核 5.8+ — BPF LSM + ring buffer
 // ══════════════════════════════════════════════════════════════════
 static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
+                              const std::string& config_path,
                               const std::string& baseline_db_path, bool skip_boot_check) {
     struct lsm_file_bpf *skel;
     int err;
@@ -1130,14 +1245,16 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
     }
 
     // epoll 同时等待文件事件 rb 与各路遥测 rb（任一遥测开启时启用）。
-    // 以数组统一登记活跃 rb：file 恒在（首位），proc/net/priv 按开关追加；
-    // 消费顺序 file→proc→net→priv，保证进程事件先于网络事件入队（进程树时序）。
+    // 以数组统一登记活跃 rb；同轮就绪时按数组顺序消费：
+    // proc 先于 file——进程 exec 先于其文件事件产生，先消费 proc rb 可保证
+    // 消费线程路由文件事件时进程树已捕获 exec（短寿进程白名单/富化依赖）；
+    // net/priv 仍在 file 之后，保持进程事件先于网络事件入队（进程树时序）。
     struct RbEntry { int fd; struct ring_buffer* rb; };
     RbEntry rbs[4];
     int nrb = 0;
-    rbs[nrb++] = {ring_buffer__epoll_fd(rb), rb};
     if (proc_skel && proc_rb)
         rbs[nrb++] = {ring_buffer__epoll_fd(proc_rb), proc_rb};
+    rbs[nrb++] = {ring_buffer__epoll_fd(rb), rb};
     if (net_skel && net_rb)
         rbs[nrb++] = {ring_buffer__epoll_fd(net_rb), net_rb};
     if (priv_skel && priv_rb)
@@ -1195,6 +1312,12 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
             __u32 wm_value = static_cast<__u32>(backpressure.GetWatermarkLevel());
             bpf_map_update_elem(fd_watermark, &wm_key, &wm_value, BPF_ANY);
         }
+
+        // SIGHUP 热加载：handler 只置标志，此处每轮检查（成功替换快照，失败保留旧配置）
+        if (g_sighup_pending) {
+            g_sighup_pending = 0;
+            reload_monitor_config(config_path);
+        }
         // retention 已移至消费线程（避免与文件处理并发访问 AlertManager）
     }
 
@@ -1234,6 +1357,7 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
 // 路径 B：内核 5.7 — BPF LSM + perf event buffer
 // ══════════════════════════════════════════════════════════════════
 static int do_monitor_perf(const Config& config, AlertManager &alert_mgr,
+                           const std::string& config_path,
                            const std::string& baseline_db_path, bool skip_boot_check) {
     warn_telemetry_unavailable(config);
 
@@ -1294,7 +1418,7 @@ static int do_monitor_perf(const Config& config, AlertManager &alert_mgr,
         return 1;
     }
 
-    run_perf_buffer_loop(pb, mctx, alert_mgr);
+    run_perf_buffer_loop(pb, mctx, alert_mgr, config_path);
 
     spdlog::info("[service_stop] monitoring loop exited");
     spdlog::info("Monitoring stopped.");
@@ -1314,6 +1438,7 @@ static int do_monitor_perf(const Config& config, AlertManager &alert_mgr,
 // 路径 C：内核 5.4 — kprobe + perf event buffer（仅告警，无法阻止）
 // ══════════════════════════════════════════════════════════════════
 static int do_monitor_kprobe(const Config& config, AlertManager &alert_mgr,
+                             const std::string& config_path,
                              const std::string& baseline_db_path, bool skip_boot_check) {
     warn_telemetry_unavailable(config);
 
@@ -1385,7 +1510,7 @@ static int do_monitor_kprobe(const Config& config, AlertManager &alert_mgr,
         return 1;
     }
 
-    run_perf_buffer_loop(pb, mctx, alert_mgr);
+    run_perf_buffer_loop(pb, mctx, alert_mgr, config_path);
 
     spdlog::info("[service_stop] monitoring loop exited");
     spdlog::info("Monitoring stopped.");
@@ -1408,23 +1533,27 @@ static int do_monitor_kprobe(const Config& config, AlertManager &alert_mgr,
 
 // ── 入口函数：根据内核版本分派到不同路径 ────────────────────────
 int do_monitor(const Config& config, AlertManager &alert_mgr,
+               const std::string& config_path,
                const std::string& baseline_db_path, bool skip_boot_check) {
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+    // SIGHUP 热加载（M0-2）：handler 只置标志，各路径主循环每轮检查后原子替换快照；
+    // 此处注册覆盖 main.cpp 的旧式 g_reload handler（进程不重启，pid 不变）
+    signal(SIGHUP, monitor_sighup_handler);
 
     auto kv = get_kernel_version();
     spdlog::info("[kernel_detect] detected kernel {}.{}", kv.major, kv.minor);
 
     if (kv.major > 5 || (kv.major == 5 && kv.minor >= 8)) {
         // 5.8+: BPF LSM + ring buffer（完整功能）
-        return do_monitor_ringbuf(config, alert_mgr, baseline_db_path, skip_boot_check);
+        return do_monitor_ringbuf(config, alert_mgr, config_path, baseline_db_path, skip_boot_check);
     } else if (kv.major == 5 && kv.minor >= 7) {
         // 5.7: BPF LSM + perf event buffer（支持 block）
-        return do_monitor_perf(config, alert_mgr, baseline_db_path, skip_boot_check);
+        return do_monitor_perf(config, alert_mgr, config_path, baseline_db_path, skip_boot_check);
     } else if (kv.major == 5 && kv.minor >= 4) {
         // 5.4~5.6: kprobe + perf event buffer（仅告警）
-        return do_monitor_kprobe(config, alert_mgr, baseline_db_path, skip_boot_check);
+        return do_monitor_kprobe(config, alert_mgr, config_path, baseline_db_path, skip_boot_check);
     } else {
         spdlog::error("[kernel_unsupported] kernel {}.{} not supported, minimum is 5.4",
                      kv.major, kv.minor);
