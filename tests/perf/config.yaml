@@ -1,0 +1,39 @@
+# W3 性能基线测量专用配置（tests/perf/）
+# 用法: sudo ./baseline-guard monitor --db baseline.db -c tests/perf/config.yaml
+# 设计：吞吐压测目标文件设为 critical 等级（四级水位下 CRITICAL 永不丢弃），
+# 与"10,000 事件/s 不丢高优先级"的验收口径一致。
+
+telemetry:
+  network: false        # 压测只打文件事件，关掉网络/DNS 减少噪声
+  dns: false
+  privilege: false
+  store: true
+  events_db: "events.db"
+  batch_size: 500
+  batch_ms: 200
+
+rules:
+  - id: "PERF-LAT"
+    name: "perf-latency-target"
+    severity: "medium"
+    monitor:
+      path: "/tmp/bg-perf/lat_target.txt"
+      events: ["write"]
+      action: "alert"
+
+  - id: "PERF-TPUT"
+    name: "perf-throughput-target"
+    severity: "critical"
+    monitor:
+      path: "/tmp/bg-perf/tput_target.txt"
+      events: ["write"]
+      action: "alert"
+
+alert:
+  dingtalk:
+    webhook: ""
+    secret: ""
+  throttle: 1           # 压测期间告警不入库也无所谓，throttle 最小化避免告警风暴
+
+db:
+  retention_days: 30

@@ -102,3 +102,10 @@
 | EXC-004 | 磁盘满 | db目录满 | check | 优雅失败，日志记录 |
 | EXC-005 | 内核不支持LSM | 老内核无BPF_LSM | monitor | `[bpf_program_error]`, exit=1 |
 | EXC-006 | 重复加载BPF | 已有一个monitor运行 | 启动第二个 | 失败或资源冲突提示 |
+
+---
+
+## 五、攻击用例库（attack-cases）
+
+6 个攻击用例（反弹 shell / 读 /etc/shadow / chmod 777 / 容器内 docker 命令 / 批量敏感读取 / 容器内篡改挂载基线文件），
+每个用例 = 攻击脚本 + 预期事件核对 + 清理步骤，可连跑多遍。清单与执行方式见 [attack-cases/README.md](attack-cases/README.md)。
