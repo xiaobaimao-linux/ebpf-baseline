@@ -102,3 +102,53 @@ rm -f events.db* && sudo bash tests/perf/reconcile_drops.sh
 # 5 分钟验收
 rm -f events.db* && sudo bash tests/perf/reconcile_drops.sh 3000000 300 10000
 ```
+
+## R12（W4 D2）：file ring buffer 256KB → 2MB，reserve_failed 清零
+
+日期：2026-10-05。针对"残余风险 1"。唯一改动：`bpf/bpf_common.h:86`
+`__uint(max_entries, 256 * 1024)` → `2 * 1024 * 1024`（仅 file 探针的 rb；
+proc/net/priv 本就是各自独立的 4MB ring `1 << 22`）。`struct event`=328B，
+ringbuf 记录按 8B 对齐 ≈336B/条：256KB≈780 条≈84ms@10k/s → 2MB≈6,240 条
+≈640ms@10k/s，吸收调度抖动能力 ×8。编译后 bpftool 自检：rb
+max_entries=2,097,152、memlock=2,117,952B，探针加载正常。
+
+### 选型对比（用数据选型）
+
+| 方案 | 缓冲窗口@10k/s | 内存增量 | 全局有序 | 结论 |
+|---|---|---|---|---|
+| A：单 ring 2MB | ~640ms（×8） | +1.75MB | 保持（仅扩容量） | **采用**，3 轮 reserve_failed 全零 |
+| B：per-CPU 512KB×8 | 每核 ~1.2s（按 1.25k/s/核摊） | +4MB | **丢失**：跨核到达乱序，消费端单线程串行做告警/基线偏差/进程树关联均带时序状态 | 排除 |
+| A′：单 ring 4MB | ~1.28s | +3.75MB | 保持 | 备选，A 已达标未启用 |
+
+B 另有一个历史佐证：W3 已记录 perf buffer（per-CPU 传输）静默丢失且计数
+缺口的问题，ringbuf 是为此引入的；退回 per-CPU 传输属开倒车。
+
+### 3 轮验收（`reconcile_drops.sh 3000000 300 10000`，不钉核，每轮 rm events.db*）
+
+| 轮 | gen_load ops | emitted | reserve_failed | bp_drop | bus.hi.p0_file | batch/store_failed | stored | 对账误差 |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 2,997,000 | 2,997,000 | **0** | 0 | 0 | 0 / 0 | 2,997,000 | 0.000% |
+| 2 | 2,995,000 | 2,995,000 | **0** | 0 | 0 | 0 / 0 | 2,995,000 | 0.000% |
+| 3 | 2,993,000 | 2,993,000 | **0** | 0 | 0 | 0 / 0 | 2,993,000 | 0.000% |
+
+bus.hi.p1_ctrl / bus.lo.p2_net 三轮均 0（参考域）。对比 D1 同口径：
+reserve_failed 1,114（0.037%）→ 0。
+
+### 副作用（预算内）
+
+| 指标 | D1 基线 | R12 后 | 判定 |
+|---|---|---|---|
+| monitor RSS（10k/s 负载中） | 252MB | 256.1MB（262,272kB） | +4.1MB ≤ +5MB ✓（ringbuf 双映射 mmap 所致） |
+| 主线程 poll CPU（pidstat -t 20s×3） | ~3% | 3.0%（usr 1.18 + sys 1.83） | ≤5% ✓ |
+| 消费线程 CPU | ~31% | 31.1% | 不变 ✓ |
+
+### 回归
+
+- `make` 全量绿；`cd tests && make unit` 55 项全过。
+- FIM 冒烟：`test_snapshot.sh` 过；`test_check.sh` 16/16 过（需 sudo，
+  非 root 下 `/var/log/baseline-guard/` 不可写会 abort，为环境前置非本次
+  回归）；`baseline-guard alerts` 实时读出压测期 CRITICAL 告警，链路正常。
+- 计数器命名未动；内核按探针 emitted/reserve_failed/backpressure_drop/
+  discarded 与用户态 bus/store 系列全部保留。
+
+**残余风险 1 至此关闭**：10k/s × 5min 内核侧零丢失达成。

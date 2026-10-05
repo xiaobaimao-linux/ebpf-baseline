@@ -83,7 +83,7 @@ static __always_inline int submit_event(void *ctx, struct event *e, int bp_decis
 /* ── ring buffer（5.8+ LSM 专用）─────────────────────────────── */
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 256 * 1024);
+    __uint(max_entries, 2 * 1024 * 1024);
 } rb SEC(".maps");
 #endif
 
