@@ -98,7 +98,7 @@ DEPS = $(OBJS:.o=.d)
 
 all: $(TARGET)
 
-BPF_COMMON_H = bpf/bpf_common.h bpf/vmlinux.h bpf/event.h
+BPF_COMMON_H = bpf/bpf_common.h bpf/vmlinux.h bpf/event.h bpf/stats_slots.h
 
 # BPF 编译
 $(BPF_OBJ): $(BPF_SRC) $(BPF_COMMON_H)
@@ -122,7 +122,7 @@ $(BPF_KPROBE_SKEL): $(BPF_KPROBE_OBJ)
 	bpftool gen skeleton $< > $@
 
 # 网络遥测版本（ring buffer，结构同 lsm_file）
-BPF_NET_H = bpf/net_event.h bpf/vmlinux.h
+BPF_NET_H = bpf/net_event.h bpf/vmlinux.h bpf/stats_slots.h
 
 $(BPF_NET_OBJ): $(BPF_NET_SRC) $(BPF_NET_H)
 	$(BPF_CC) $(BPF_CFLAGS) -c -o $@ $<
@@ -131,7 +131,7 @@ $(BPF_NET_SKEL): $(BPF_NET_OBJ)
 	bpftool gen skeleton $< > $@
 
 # 权限遥测版本（ring buffer，结构同 net_watch）
-BPF_PRIV_H = bpf/priv_event.h bpf/vmlinux.h
+BPF_PRIV_H = bpf/priv_event.h bpf/vmlinux.h bpf/stats_slots.h
 
 $(BPF_PRIV_OBJ): $(BPF_PRIV_SRC) $(BPF_PRIV_H)
 	$(BPF_CC) $(BPF_CFLAGS) -c -o $@ $<
@@ -140,7 +140,7 @@ $(BPF_PRIV_SKEL): $(BPF_PRIV_OBJ)
 	bpftool gen skeleton $< > $@
 
 # 进程生命周期遥测版本（ring buffer，结构同 net_watch）
-BPF_PROC_H = bpf/proc_event.h bpf/vmlinux.h
+BPF_PROC_H = bpf/proc_event.h bpf/vmlinux.h bpf/stats_slots.h
 
 $(BPF_PROC_OBJ): $(BPF_PROC_SRC) $(BPF_PROC_H)
 	$(BPF_CC) $(BPF_CFLAGS) -c -o $@ $<

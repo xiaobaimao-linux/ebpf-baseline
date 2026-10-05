@@ -100,8 +100,7 @@ bool AlertManager::IsEnabled() const {
 }
 
 // 检查是否被节流（同一规则在throttle_seconds内只允许一次告警）
-bool AlertManager::IsThrottled(const std::string& rule_id) {
-    if (throttle_seconds_ <= 0) {
+bool AlertManager::IsThrottled(const std::string& rule_id) {    if (throttle_seconds_ <= 0) {
         return false;
     }
 
@@ -123,6 +122,21 @@ bool AlertManager::IsThrottled(const std::string& rule_id) {
     spdlog::debug("Alert throttled for rule {}: {}s elapsed, {}s remaining",
                   rule_id, elapsed, remaining);
     return true;
+}
+
+// 非侵入式窥探：与 IsThrottled 同一判定，但不更新 last_alert_time_
+bool AlertManager::ThrottledNow(const std::string& rule_id) const {
+    if (throttle_seconds_ <= 0) {
+        return false;
+    }
+    auto it = last_alert_time_.find(rule_id);
+    if (it == last_alert_time_.end()) {
+        return false;
+    }
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::steady_clock::now() - it->second)
+                       .count();
+    return elapsed < throttle_seconds_;
 }
 
 // 执行保留策略：按天数 + 按数量双保险
@@ -252,8 +266,13 @@ bool AlertManager::PostJson(const std::string& url, const json& payload) {
 }
 
 bool AlertManager::SendDingTalk(const AlertEvent& event) {
-    // 1. 检查是否被节流
-    bool throttled = IsThrottled(event.rule_id);
+    // 1. 检查是否被节流：节流窗口内钉钉不发、库不存（首条已入库），
+    //    消息体/JSON 构建纯属浪费，提前返回（外部可观察行为不变）
+    if (IsThrottled(event.rule_id)) {
+        spdlog::debug("Alert throttled for rule {}, skip DingTalk and DB persist",
+                      event.rule_id);
+        return false;
+    }
 
     // 2. 构造钉钉消息
     std::string emoji = "";
@@ -291,22 +310,17 @@ bool AlertManager::SendDingTalk(const AlertEvent& event) {
         {"text", md}
     };
 
-    // 3. 发送钉钉（如果被节流则跳过）
+    // 3. 发送钉钉（此处必未被节流——节流已在函数开头提前返回）
     bool dingtalk_sent = false;
-    if (!throttled && IsEnabled()) {
+    if (IsEnabled()) {
         const std::string signed_url = BuildSignedUrl(dingtalk_url_, dingtalk_secret_);
         dingtalk_sent = PostJson(signed_url, payload);
-    } else if (throttled) {
-        spdlog::warn("Alert throttled for rule {} ({}s), skip DingTalk but persist to DB",
-                     event.rule_id, throttle_seconds_);
-    } else if (!IsEnabled()) {
+    } else {
         spdlog::debug("DingTalk not enabled, skip webhook but persist to DB");
     }
 
-    // 4. 落库：未节流时记录；节流窗口内跳过（首条已入库，防止事件风暴刷爆库）
-    if (!throttled) {
-        SaveAlertToDB(event, dingtalk_sent);
-    }
+    // 4. 落库（未节流路径）
+    SaveAlertToDB(event, dingtalk_sent);
 
     return dingtalk_sent;
 }

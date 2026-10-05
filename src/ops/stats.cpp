@@ -11,8 +11,7 @@
 #include <unistd.h>
 #include <vector>
 
-// drop_stats map 的 pinned 路径（与 monitor.cpp 保持一致）
-static const char* kDropStatsPinPath = "/sys/fs/bpf/baseline-guard/drop_stats";
+#include "stats_slots.h"
 
 static int GetNumPossibleCPUs() {
     // 优先从 sysfs 读取准确值
@@ -72,8 +71,66 @@ static std::set<int> GetOnlineCPUs() {
 static void PrintUsage() {
     printf("Usage: baseline-guard stats [options]\n");
     printf("Options:\n");
-    printf("  --drop        show ring buffer drop statistics from eBPF map\n");
+    printf("  --drop        show drop/accounting counters from pinned eBPF maps\n");
     printf("  -h, --help    display this message\n");
+}
+
+// 读 PERCPU_ARRAY 计数 map，按槽位汇总在线 CPU；map 不存在返回 false
+static bool ReadPercpuDropStats(const char* pin_path, unsigned long long sums[DROP_STATS_SLOTS]) {
+    int map_fd = bpf_obj_get(pin_path);
+    if (map_fd < 0)
+        return false;
+
+    int ncpus = GetNumPossibleCPUs();
+    std::vector<unsigned long long> values(static_cast<size_t>(ncpus) * DROP_STATS_SLOTS, 0);
+
+    bool ok = true;
+    std::set<int> online = GetOnlineCPUs();
+    for (unsigned int slot = 0; slot < DROP_STATS_SLOTS; ++slot) {
+        // percpu map：每个 key（槽位）一次读出 ncpus 个 __u64，buffer 按槽位分段
+        unsigned long long* base = values.data() + static_cast<size_t>(ncpus) * slot;
+        if (bpf_map_lookup_elem(map_fd, &slot, base) != 0) {
+            ok = false;
+            break;
+        }
+        unsigned long long total = 0;
+        for (int cpu : online) {
+            if (cpu < ncpus)
+                total += base[cpu];
+        }
+        sums[slot] = total;
+    }
+
+    close(map_fd);
+    return ok;
+}
+
+// 读用户态 ARRAY 计数 map；map 不存在返回 false
+static bool ReadUserStats(const char* pin_path, unsigned long long vals[USER_STATS_SLOTS]) {
+    int map_fd = bpf_obj_get(pin_path);
+    if (map_fd < 0)
+        return false;
+    bool ok = true;
+    for (unsigned int slot = 0; slot < USER_STATS_SLOTS; ++slot) {
+        if (bpf_map_lookup_elem(map_fd, &slot, &vals[slot]) != 0) {
+            ok = false;
+            break;
+        }
+    }
+    close(map_fd);
+    return ok;
+}
+
+// 按探针打印内核侧计数（emitted / reserve_failed / backpressure_drop / discarded）
+static void PrintKernelProbe(const char* probe, const unsigned long long sums[DROP_STATS_SLOTS],
+                             bool has_backpressure) {
+    printf("[%s]\n", probe);
+    printf("kernel.%s.emitted           = %llu\n", probe, sums[DROP_SLOT_EMITTED]);
+    printf("kernel.%s.reserve_failed    = %llu\n", probe, sums[DROP_SLOT_RESERVE_FAIL]);
+    if (has_backpressure)
+        printf("kernel.%s.backpressure_drop = %llu\n", probe, sums[DROP_SLOT_BACKPRESSURE]);
+    if (sums[DROP_SLOT_DISCARDED] > 0)
+        printf("kernel.%s.discarded         = %llu\n", probe, sums[DROP_SLOT_DISCARDED]);
 }
 
 int RunStats(int argc, char* argv[]) {
@@ -104,40 +161,50 @@ int RunStats(int argc, char* argv[]) {
         return 1;
     }
 
-    // 打开 pinned map
-    int map_fd = bpf_obj_get(kDropStatsPinPath);
-    if (map_fd < 0) {
-        fprintf(stderr, "Error: failed to open drop_stats map at %s\n", kDropStatsPinPath);
+    bool any = false;
+    printf("Drop/accounting counters (pinned eBPF maps, monitor must be running):\n");
+
+    // ── 内核侧：按探针分组（map 未 pin 即该探针未运行，跳过）──────
+    struct ProbeEntry { const char* name; const char* pin; bool has_bp; };
+    const ProbeEntry probes[] = {
+        {"file", DROP_STATS_PIN_PATH, true},
+        {"proc", PROC_DROP_STATS_PIN_PATH, false},
+        {"net",  NET_DROP_STATS_PIN_PATH, false},
+        {"priv", PRIV_DROP_STATS_PIN_PATH, false},
+    };
+    for (const auto& p : probes) {
+        unsigned long long sums[DROP_STATS_SLOTS] = {0};
+        if (ReadPercpuDropStats(p.pin, sums)) {
+            any = true;
+            PrintKernelProbe(p.name, sums, p.has_bp);
+        }
+    }
+
+    // ── 用户态：事件总线 / 批缓冲 / 落库 ─────────────────────────
+    unsigned long long uvals[USER_STATS_SLOTS] = {0};
+    if (ReadUserStats(USER_STATS_PIN_PATH, uvals)) {
+        any = true;
+        static const char* hi_names[4] = {"file", "ctrl", "p2", "p3"};
+        static const char* lo_names[4] = {"p0", "p1", "net", "dns"};
+        printf("[userspace]\n");
+        for (int p = 0; p < 4; p++)
+            printf("bus.queue_full.hi.p%d_%s = %llu\n", p, hi_names[p],
+                   uvals[USTAT_BUS_DROP_HI_P0 + p]);
+        for (int p = 0; p < 4; p++)
+            printf("bus.queue_full.lo.p%d_%s = %llu\n", p, lo_names[p],
+                   uvals[USTAT_BUS_DROP_LO_P0 + p]);
+        printf("batch_overflow = %llu\n", uvals[USTAT_BATCH_OVERFLOW]);
+        printf("store_failed   = %llu\n", uvals[USTAT_STORE_FAILED]);
+        printf("bus.pushed     = %llu\n", uvals[USTAT_BUS_PUSHED]);
+        printf("store.stored   = %llu\n", uvals[USTAT_STORE_STORED]);
+        printf("bus.depth.hi   = %llu\n", uvals[USTAT_BUS_HI_DEPTH]);
+        printf("bus.depth.lo   = %llu\n", uvals[USTAT_BUS_LO_DEPTH]);
+    }
+
+    if (!any) {
+        fprintf(stderr, "Error: no pinned stats maps found under %s\n", BG_PIN_DIR);
         fprintf(stderr, "Is the monitor process running? (sudo ./baseline-guard monitor --db ...)\n");
         return 1;
     }
-
-    // 读取 PERCPU_ARRAY: key=0, value 为每个 CPU 的 __u64 计数器
-    int ncpus = GetNumPossibleCPUs();
-    std::vector<unsigned long long> values(ncpus, 0);
-
-    unsigned int key = 0;
-    int err = bpf_map_lookup_elem(map_fd, &key, values.data());
-    if (err != 0) {
-        fprintf(stderr, "Error: failed to read drop_stats map: %s\n", strerror(-err));
-        close(map_fd);
-        return 1;
-    }
-
-    // 只汇总在线 CPU
-    std::set<int> online = GetOnlineCPUs();
-    unsigned long long total = 0;
-    printf("Ring buffer drop statistics (online CPUs only):\n");
-    printf("  %-6s  %-12s\n", "CPU", "DROPPED");
-    for (int cpu : online) {
-        if (cpu < ncpus) {
-            printf("  %-6d  %-12llu\n", cpu, values[cpu]);
-            total += values[cpu];
-        }
-    }
-    printf("  %-6s  %-12s\n", "------", "------------");
-    printf("  %-6s  %-12llu\n", "TOTAL", total);
-
-    close(map_fd);
     return 0;
 }

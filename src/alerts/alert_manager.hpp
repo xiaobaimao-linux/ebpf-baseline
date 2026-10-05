@@ -20,7 +20,12 @@ struct FileActorContext {
     std::string user_name;
     std::string exe;
     std::string container_id;
-    json ancestors = json::array();  // [{pid,comm,exe}] 自近及远 ≤8 层
+    // 祖先链 [{pid,comm,exe}] 自近及远 ≤8 层：以指针引用消费线程缓存
+    // （cached_ancestors_of 条目，事件处理期内有效），避免每事件深拷贝；
+    // 为空表示无/未知。ancestors_json 为其预序列化文本（空链为空串，
+    // 对应原 "empty() ? \"\" : dump()" 语义）。
+    const json* ancestors = nullptr;
+    std::string ancestors_json;
     bool valid = false;
 };
 
@@ -58,6 +63,11 @@ public:
     // 发送钉钉告警（内部自动落库到 alerts 表）
     // 返回值: 钉钉是否实际发送成功（被节流返回 false，但仍会落库）
     bool SendDingTalk(const AlertEvent& event);
+
+    // 非侵入式节流窥探（不更新节流时间戳）：调用方可用它在构建 AlertEvent
+    // 之前跳过无用功——节流窗口内 SendDingTalk 本来就不发不存。
+    // 单线程调用（消费线程），与 SendDingTalk 的 IsThrottled 判定同源。
+    bool ThrottledNow(const std::string& rule_id) const;
     
     // 执行保留策略清理（可由外部定期调用，如每1小时一次）
     // 返回删除的记录数

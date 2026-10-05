@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <sqlite3.h>
 #include <string>
@@ -33,7 +34,9 @@ public:
     // 强制刷新（缓冲非空时一事务写入）
     void Flush();
 
-    unsigned long long stored_count() const { return stored_; }
+    unsigned long long stored_count() const { return stored_.load(std::memory_order_relaxed); }
+    // 事务写入失败（BEGIN/insert/COMMIT 任一失败 ROLLBACK）累计丢弃的行数
+    unsigned long long failed_count() const { return failed_.load(std::memory_order_relaxed); }
     const std::string& host_id() const { return host_id_; }
     const std::string& db_path() const { return db_path_; }
 
@@ -68,7 +71,9 @@ private:
     sqlite3* db_ = nullptr;
     sqlite3_stmt* insert_stmt_ = nullptr;
     std::vector<PendingRow> pending_;
-    unsigned long long stored_ = 0;
+    // atomic：stats 同步在主循环线程读取，写仅在消费线程
+    std::atomic<unsigned long long> stored_{0};
+    std::atomic<unsigned long long> failed_{0};   // ROLLBACK 丢弃的行数累计（store_failed 计数器）
     std::string host_id_;
 
     // 上次刷新时间（steady_clock ms），用于 batch_ms 判定

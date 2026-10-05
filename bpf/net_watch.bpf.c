@@ -26,6 +26,7 @@
  *     线格式 → 点分文本的转换在用户态做（同 ptrace request 映射）。
  */
 #include "net_event.h"
+#include "stats_slots.h"
 #include "vmlinux.h"
 
 #include <bpf/bpf_core_read.h>
@@ -48,17 +49,21 @@ struct {
 /* ── per-CPU 丢包统计 ─────────────────────────────────────────── */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
+    __uint(max_entries, DROP_STATS_SLOTS);
     __type(key, __u32);
     __type(value, __u64);
 } net_drop_stats SEC(".maps");
 
-static __always_inline void inc_net_drop_count(void)
+static __always_inline void inc_net_drop_slot(__u32 slot)
 {
-    __u32 key = 0;
-    __u64 *cnt = bpf_map_lookup_elem(&net_drop_stats, &key);
+    __u64 *cnt = bpf_map_lookup_elem(&net_drop_stats, &slot);
     if (cnt)
         (*cnt)++;
+}
+
+static __always_inline void inc_net_drop_count(void)
+{
+    inc_net_drop_slot(DROP_SLOT_RESERVE_FAIL);
 }
 
 static __always_inline struct net_event *reserve_net_event(void)
@@ -168,10 +173,13 @@ static __always_inline void submit_dns_event(struct net_event *e, struct sockadd
     /* sin_addr 为网络序，原始拷贝前 4 字节；源地址/端口未知保持 0 */
     __builtin_memcpy(e->daddr, &sin->sin_addr, sizeof(sin->sin_addr));
 
-    if (parse_dns_query(e, buff, len) == 0)
+    if (parse_dns_query(e, buff, len) == 0) {
         bpf_ringbuf_submit(e, 0);
-    else
+        inc_net_drop_slot(DROP_SLOT_EMITTED);
+    } else {
         bpf_ringbuf_discard(e, 0);
+        inc_net_drop_slot(DROP_SLOT_DISCARDED);
+    }
 }
 
 /* ── 已连接 socket 的目的地址回溯：fd → file → socket → sock ──────
@@ -386,6 +394,7 @@ int kprobe_tcp_v4_connect(struct pt_regs *ctx)
     __builtin_memcpy(e->saddr, &saddr, sizeof(saddr));
 
     bpf_ringbuf_submit(e, 0);
+    inc_net_drop_slot(DROP_SLOT_EMITTED);
     return 0;
 }
 
@@ -421,6 +430,7 @@ int kretprobe_inet_csk_accept(struct pt_regs *ctx)
     }
 
     bpf_ringbuf_submit(e, 0);
+    inc_net_drop_slot(DROP_SLOT_EMITTED);
     return 0;
 }
 
@@ -456,6 +466,7 @@ int tp_sys_enter_bind(struct trace_event_raw_sys_enter *ctx)
     __builtin_memcpy(e->saddr, &sin.sin_addr, sizeof(sin.sin_addr));
 
     bpf_ringbuf_submit(e, 0);
+    inc_net_drop_slot(DROP_SLOT_EMITTED);
     return 0;
 }
 

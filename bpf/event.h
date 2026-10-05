@@ -1,6 +1,8 @@
 #ifndef EVENT_H
 #define EVENT_H
 
+#include "stats_slots.h"
+
 // 数值定义，无枚举
 #define ACTION_LOG 0
 #define ACTION_ALERT 1

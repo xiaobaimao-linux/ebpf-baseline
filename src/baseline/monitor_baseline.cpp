@@ -99,7 +99,7 @@ void HandleBaselineDeviation(const BaselineDeviation& dev,
         evt.uid          = std::to_string(actor->uid);
         evt.exe          = actor->exe;
         evt.container_id = actor->container_id;
-        evt.ancestors    = actor->ancestors.empty() ? "" : actor->ancestors.dump();
+        evt.ancestors    = actor->ancestors_json;
     }
 
     alert_mgr.SendDingTalk(evt);

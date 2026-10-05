@@ -51,6 +51,13 @@ public:
 
     size_t capacity() const { return capacity_; }
 
+    // 当前队列深度（enqueue_pos - dequeue_pos，对账排干判定用；MPSC 下近似值）
+    size_t depth() const {
+        unsigned long long enq = enqueue_pos_.load(std::memory_order_relaxed);
+        unsigned long long deq = dequeue_pos_.load(std::memory_order_relaxed);
+        return enq > deq ? static_cast<size_t>(enq - deq) : 0;
+    }
+
 private:
     size_t capacity_ = 0;
     size_t mask_ = 0;
@@ -87,6 +94,10 @@ public:
 
     size_t hi_capacity() const { return hi_.capacity(); }
     size_t lo_capacity() const { return lo_.capacity(); }
+
+    // 当前队列深度（对账排干判定用）
+    size_t hi_depth() const { return hi_.depth(); }
+    size_t lo_depth() const { return lo_.depth(); }
 
 private:
     MpscQueue hi_;

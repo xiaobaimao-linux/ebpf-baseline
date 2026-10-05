@@ -27,6 +27,7 @@
  *   - mount 的字符串指针来自用户态，probe_read 失败只影响对应字段（空串）。
  */
 #include "priv_event.h"
+#include "stats_slots.h"
 #include "vmlinux.h"
 
 #include <bpf/bpf_core_read.h>
@@ -42,17 +43,21 @@ struct {
 /* ── per-CPU 丢包统计 ─────────────────────────────────────────── */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
+    __uint(max_entries, DROP_STATS_SLOTS);
     __type(key, __u32);
     __type(value, __u64);
 } priv_drop_stats SEC(".maps");
 
-static __always_inline void inc_priv_drop_count(void)
+static __always_inline void inc_priv_drop_slot(__u32 slot)
 {
-    __u32 key = 0;
-    __u64 *cnt = bpf_map_lookup_elem(&priv_drop_stats, &key);
+    __u64 *cnt = bpf_map_lookup_elem(&priv_drop_stats, &slot);
     if (cnt)
         (*cnt)++;
+}
+
+static __always_inline void inc_priv_drop_count(void)
+{
+    inc_priv_drop_slot(DROP_SLOT_RESERVE_FAIL);
 }
 
 static __always_inline struct priv_event *reserve_priv_event(void)
@@ -92,6 +97,7 @@ static __always_inline int handle_setid(struct trace_event_raw_sys_enter *ctx,
     e->priv_kind  = kind;
     e->u.target_id = target_id;
     bpf_ringbuf_submit(e, 0);
+    inc_priv_drop_slot(DROP_SLOT_EMITTED);
     return 0;
 }
 
@@ -145,6 +151,7 @@ int tp_sys_enter_capset(struct trace_event_raw_sys_enter *ctx)
     e->priv_kind     = PRIV_KIND_CAPSET;
     e->u.effective_lo = effective_lo;
     bpf_ringbuf_submit(e, 0);
+    inc_priv_drop_slot(DROP_SLOT_EMITTED);
     return 0;
 }
 
@@ -161,6 +168,7 @@ int tp_sys_enter_ptrace(struct trace_event_raw_sys_enter *ctx)
     e->u.ptrace.request  = (unsigned long long)ctx->args[0];
     e->u.ptrace.target_pid = (__u32)ctx->args[1];
     bpf_ringbuf_submit(e, 0);
+    inc_priv_drop_slot(DROP_SLOT_EMITTED);
     return 0;
 }
 
@@ -204,6 +212,7 @@ int tp_module_load(struct tp_module_load_ctx *ctx)
     }
 
     bpf_ringbuf_submit(e, 0);
+    inc_priv_drop_slot(DROP_SLOT_EMITTED);
     return 0;
 }
 
@@ -233,6 +242,7 @@ int tp_sys_enter_mount(struct trace_event_raw_sys_enter *ctx)
     e->u.mount.flags = (unsigned long long)ctx->args[3];
 
     bpf_ringbuf_submit(e, 0);
+    inc_priv_drop_slot(DROP_SLOT_EMITTED);
     return 0;
 }
 
@@ -249,6 +259,7 @@ int tp_sys_enter_unshare(struct trace_event_raw_sys_enter *ctx)
     e->u.unshare.flags = (unsigned long long)ctx->args[0];
 
     bpf_ringbuf_submit(e, 0);
+    inc_priv_drop_slot(DROP_SLOT_EMITTED);
     return 0;
 }
 
@@ -266,6 +277,7 @@ int tp_sys_enter_setns(struct trace_event_raw_sys_enter *ctx)
     e->u.setns.nstype = (__u32)ctx->args[1];
 
     bpf_ringbuf_submit(e, 0);
+    inc_priv_drop_slot(DROP_SLOT_EMITTED);
     return 0;
 }
 

@@ -24,6 +24,8 @@
 #include <bpf/libbpf.h>
 #include <cerrno>
 #include <csignal>
+#include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -38,6 +40,7 @@
 #include <sys/utsname.h>
 #include <thread>
 #include <unistd.h>
+#include <map>
 #include <unordered_map>
 #include <vector>
 #include <sstream>
@@ -220,7 +223,12 @@ void on_violation_detected(const Rule& rule,
                  user_name.empty() ? "unknown" : user_name,
                  uid.empty() ? "-" : uid);
 
-    // 2. 发钉钉 + 自动落库（AlertManager 内部统一处理，被节流也入库）
+    // 2. 节流窗口内不构建 AlertEvent：SendDingTalk 本来就不发不存，
+    //    构建（含 ancestors JSON dump / NowString）纯属浪费（高频事件路径实测热点）
+    if (alert_mgr.ThrottledNow(rule.id))
+        return;
+
+    // 3. 发钉钉 + 自动落库（AlertManager 内部统一处理）
     AlertEvent evt;
     evt.rule_id      = rule.id;
     evt.rule_name    = rule.name;
@@ -238,7 +246,7 @@ void on_violation_detected(const Rule& rule,
     if (actor != nullptr) {
         evt.exe          = actor->exe;
         evt.container_id = actor->container_id;
-        evt.ancestors    = actor->ancestors.empty() ? "" : actor->ancestors.dump();
+        evt.ancestors    = actor->ancestors_json;
     }
 
     alert_mgr.SendDingTalk(evt);
@@ -333,7 +341,7 @@ void on_check_mismatch_detected(const Rule& rule,
     if (actor != nullptr) {
         evt.exe          = actor->exe;
         evt.container_id = actor->container_id;
-        evt.ancestors    = actor->ancestors.empty() ? "" : actor->ancestors.dump();
+        evt.ancestors    = actor->ancestors_json;
     }
 
     alert_mgr.SendDingTalk(evt);
@@ -401,7 +409,41 @@ struct MonitorContext {
     WatermarkBackpressure*   backpressure = nullptr;
     std::vector<struct event> event_batch;
     size_t                   dropped_count = 0;
+    int                      user_stats_fd = -1;   // pinned user_stats map（批溢出计数暴露）
 };
+
+// ── 用户态计数器 → pinned user_stats map（stats --drop 读取）─────────
+// 槽位定义见 bpf/stats_slots.h；bus/store 为空时对应槽写 0。
+static void sync_user_stats(int fd, const EventBus* bus, const EventStore* store,
+                            const MonitorContext* mctx) {
+    if (fd < 0)
+        return;
+    __u64 vals[USER_STATS_SLOTS] = {};
+    if (bus) {
+        for (int p = 0; p < 4; p++) {
+            vals[USTAT_BUS_DROP_HI_P0 + p] = bus->drop_count(true, p);
+            vals[USTAT_BUS_DROP_LO_P0 + p] = bus->drop_count(false, p);
+        }
+        vals[USTAT_BUS_PUSHED]   = bus->pushed_count();
+        vals[USTAT_BUS_HI_DEPTH] = bus->hi_depth();
+        vals[USTAT_BUS_LO_DEPTH] = bus->lo_depth();
+    }
+    if (mctx)
+        vals[USTAT_BATCH_OVERFLOW] = mctx->dropped_count;
+    if (store) {
+        vals[USTAT_STORE_FAILED] = store->failed_count();
+        vals[USTAT_STORE_STORED] = store->stored_count();
+    }
+    for (__u32 i = 0; i < USER_STATS_SLOTS; i++)
+        bpf_map_update_elem(fd, &i, &vals[i], BPF_ANY);
+}
+
+// pin 辅助：先 unlink 陈旧 pin（上次异常退出残留）再 pin，失败仅告警
+static void pin_map_best_effort(struct bpf_map* map, const char* path) {
+    unlink(path);
+    if (int err = bpf_map__pin(map, path))
+        spdlog::warn("[bpf_map_pin] failed to pin {}: {}", path, strerror(-err));
+}
 
 // ── 白名单匹配：从 FileActorContext.ancestors JSON 还原祖先 exe 链 ──
 // ancestors 为 [{pid,comm,exe}] 自近及远 ≤8 层（Enricher::ancestors_of 产物）
@@ -512,9 +554,13 @@ static void process_event_core(struct event* e, MonitorContext* mctx,
             std::string exe;
             bool suppressed;
             if (actor != nullptr && !actor->exe.empty()) {
+                static const json kNoAncestors = json::array();
                 suppressed = g_whitelist_matcher.Match(*g_whitelist_table, rule,
                                                        e->pid, e->start_time, actor->exe,
-                                                       actor_ancestor_exes(actor->ancestors),
+                                                       actor_ancestor_exes(
+                                                           actor->ancestors != nullptr
+                                                               ? *actor->ancestors
+                                                               : kNoAncestors),
                                                        &exe);
             } else {
                 suppressed = g_whitelist_matcher.Match(*g_whitelist_table, rule, e->pid,
@@ -567,13 +613,14 @@ static void process_event_core(struct event* e, MonitorContext* mctx,
                 spdlog::warn(oss.str());
             }
         } else {
+            // 无哈希基线的访问提示与 VIOLATION 行重复（同事件已告警），
+            // 高频下 warn+flush 是消费线程热点，降为 debug 且不再逐条 flush
             std::ostringstream oss;
             oss << "[" << actionToString(static_cast<Action>(e->action)) << "] File access detected (no hash baseline)\n"
                 << "  path: " << (it_path != file_rules->inode_to_path.end() ? it_path->second : "unknown") << "\n"
                 << "  pid: " << e->pid << "\n"
                 << "  comm: " << e->comm << std::endl;
-            spdlog::warn(oss.str());
-            spdlog::default_logger()->flush();
+            spdlog::debug(oss.str());
         }
     }
     }
@@ -763,6 +810,7 @@ static int run_perf_buffer_loop(struct perf_buffer *pb,
     int count = 0;
     const int RETENTION_INTERVAL = 36000;
     const int WL_STATS_INTERVAL = 600;   // 100ms 轮询 × 600 = 60s 抑制计数日志
+    const int USTATS_INTERVAL = 10;      // 100ms 轮询 × 10 = 1s 用户态计数器同步
 
     while (running) {
         count++;
@@ -780,6 +828,10 @@ static int run_perf_buffer_loop(struct perf_buffer *pb,
 
         FlushEventBatch(&mctx);
 
+        // 用户态计数器暴露（perf 降级路径无消费线程，此处周期同步批溢出计数）
+        if (count % USTATS_INTERVAL == 0)
+            sync_user_stats(mctx.user_stats_fd, nullptr, nullptr, &mctx);
+
         if (count % RETENTION_INTERVAL == 0) {
             int deleted = alert_mgr.RunRetention();
             (void)deleted;
@@ -790,6 +842,7 @@ static int run_perf_buffer_loop(struct perf_buffer *pb,
     }
 
     FlushEventBatch(&mctx);
+    sync_user_stats(mctx.user_stats_fd, nullptr, nullptr, &mctx);
 
     if (mctx.dropped_count > 0) {
         spdlog::warn("[batch] {} events dropped (batch overflow, max_batch_size={})",
@@ -813,12 +866,59 @@ struct TelemetryRuntime {
     bool                   proc_tree_on = false;  // proc_watch 启动成功为 true（文件事件富化）
     volatile bool*         running   = nullptr;   // 全局退出标志
     AlertManager*          alert_mgr = nullptr;   // retention（已移至消费线程）
+    int                    user_stats_fd = -1;    // pinned user_stats map（计数器暴露）
 };
 
 // ── 文件事件进程上下文组装（仅消费线程调用）────────────────────────
 // 按 (pid, start_time) 查进程树：命中填节点 uid/gid/ppid/exe/container_id
 // （valid=true）；miss 时 uid/gid 用事件值、user_name 用 getpwuid(uid) 兜底，
 // 其余留空（valid=false）。祖先链复用 Enricher 逻辑，自近及远 ≤8 层。
+// getpwuid 每次调都走 NSS 读 /etc/passwd（无 nscd 时约几十 µs），高频事件
+// 路径下是消费线程热点；uid→用户名运行期内不变，进程内缓存（仅消费线程访问）。
+static std::string cached_user_name(unsigned int uid) {
+    static std::unordered_map<unsigned int, std::string> cache;
+    auto it = cache.find(uid);
+    if (it != cache.end())
+        return it->second;
+    std::string name;
+    if (struct passwd* pw = getpwuid(static_cast<uid_t>(uid)))
+        name = pw->pw_name;
+    cache.emplace(uid, name);
+    return name;
+}
+
+// 祖先链按 (pid, start_time) 缓存：同一进程实例的祖先链在其生命周期内不变
+// （祖先 exec 造成的短暂 staleness 与 WhitelistMatcher 既有 (pid,start_time)
+// 缓存语义一致）；map 有界防膨胀。start_time=0 不可键控时直接计算。
+// dumped 为 a.dump() 的预计算串（空链为 ""，对应原 empty()?"":dump() 语义），
+// 消费线程每事件引用一次，省去重复 dump。
+struct AncestorsCached {
+    json        a;
+    std::string dumped;   // a.empty() 时为 ""
+};
+static const AncestorsCached& cached_ancestors_of(Enricher* enr, unsigned int pid,
+                                                  unsigned long long start_time,
+                                                  unsigned int ppid) {
+    using Key = std::pair<unsigned int, unsigned long long>;
+    static std::map<Key, AncestorsCached> cache;   // 仅消费线程访问
+    if (start_time == 0) {
+        thread_local AncestorsCached tmp;
+        tmp.a = enr->ancestors_of(pid, ppid);
+        tmp.dumped = tmp.a.empty() ? "" : tmp.a.dump();
+        return tmp;
+    }
+    const Key k{pid, start_time};
+    auto it = cache.find(k);
+    if (it != cache.end())
+        return it->second;
+    if (cache.size() >= 4096)
+        cache.clear();
+    AncestorsCached e;
+    e.a = enr->ancestors_of(pid, ppid);
+    e.dumped = e.a.empty() ? "" : e.a.dump();
+    return cache.emplace(k, std::move(e)).first->second;
+}
+
 static FileActorContext build_file_actor(const struct event& e, TelemetryRuntime* rt) {
     FileActorContext actor;
     unsigned int ppid = 0;
@@ -828,17 +928,17 @@ static FileActorContext build_file_actor(const struct event& e, TelemetryRuntime
         actor.ppid = node->ppid;
         actor.exe = node->exe_str();
         actor.container_id = node->container_id_str();
-        if (struct passwd* pw = getpwuid(static_cast<uid_t>(node->uid)))
-            actor.user_name = pw->pw_name;
+        actor.user_name = cached_user_name(node->uid);
         actor.valid = true;
         ppid = node->ppid;
     } else {
         actor.uid = e.uid;
         actor.gid = e.gid;
-        if (struct passwd* pw = getpwuid(static_cast<uid_t>(e.uid)))
-            actor.user_name = pw->pw_name;
+        actor.user_name = cached_user_name(e.uid);
     }
-    actor.ancestors = rt->enricher->ancestors_of(e.pid, ppid);
+    const auto& anc = cached_ancestors_of(rt->enricher, e.pid, e.start_time, ppid);
+    actor.ancestors      = anc.a.empty() ? nullptr : &anc.a;
+    actor.ancestors_json = anc.dumped;
     return actor;
 }
 
@@ -870,46 +970,167 @@ static std::string file_event_path(const struct event& e) {
     return std::string(e.path);
 }
 
-// struct event -> JSON（file.write/chmod/... 形状同 net/priv 渲染），
-// 同时回填 rec.uid/ppid/exe/container_id 供 events 表索引列；
-// actor 为空（proc_watch 未启动）时 uid/gid 退回事件值、exe/container 省略。
-static void render_file_event(const struct event& e, struct EventRecord& rec, json& out,
-                              const FileActorContext* actor) {
-    out["event_type"] = file_event_kind(e);
-    out["ts"]         = rec.ts_ns;
+// ── R10：CAT_FILE payload 直写 JSON 序列化 ─────────────────────────
+// 输出与 nlohmann::json::dump() 逐字节一致（map 序键 / ensure_ascii=false /
+// 无效 UTF-8 替换 U+FFFD），但跳过 json DOM 的 std::map 节点分配与销毁
+// （压测下约占消费线程 40-50% CPU，是吞吐瓶颈的主因）。
+namespace {
 
-    json file;
-    file["path"]   = file_event_path(e);
-    file["ino"]    = e.ino;
-    file["mask"]   = e.mask;
-    file["action"] = actionToString(static_cast<Action>(e.action));
-    if (e.event_type == EVENT_CHMOD)
-        file["new_mode"] = mode_to_string(e.new_mode & 0777);
-    if (e.event_type == EVENT_CHOWN) {
-        file["new_uid"] = e.new_uid;
-        file["new_gid"] = e.new_gid;
+// Höhrmann UTF-8 DFA（与 nlohmann detail::serializer::decode 同一状态表，
+// 逐字节行为一致：ACCEPT=0 / REJECT=1，其余为中间态）
+inline std::uint8_t utf8_dfa_decode(std::uint8_t& state, std::uint32_t& codep,
+                                    std::uint8_t byte) noexcept {
+    static const std::uint8_t utf8d[400] = {
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, // 00..1F
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, // 20..3F
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, // 40..5F
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, // 60..7F
+        1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9, // 80..9F
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7, // A0..BF
+        8,8,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2, // C0..DF
+        0xA,0x3,0x3,0x3,0x3,0x3,0x3,0x3,0x3,0x3,0x3,0x3,0x3,0x4,0x3,0x3, // E0..EF
+        0xB,0x6,0x6,0x6,0x5,0x8,0x8,0x8,0x8,0x8,0x8,0x8,0x8,0x8,0x8,0x8, // F0..FF
+        0x0,0x1,0x2,0x3,0x5,0x8,0x7,0x1,0x1,0x1,0x4,0x6,0x1,0x1,0x1,0x1, // s0
+        1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,0,1,0,1,1,1,1,1,1, // s1..s2
+        1,2,1,1,1,1,1,2,1,2,1,1,1,1,1,1,1,1,1,1,1,1,1,2,1,1,1,1,1,1,1,1, // s3..s4
+        1,2,1,1,1,1,1,1,1,2,1,1,1,1,1,1,1,1,1,1,1,1,1,3,1,3,1,1,1,1,1,1, // s5..s6
+        1,3,1,1,1,1,1,3,1,3,1,1,1,1,1,1,1,3,1,1,1,1,1,1,1,1,1,1,1,1,1,1, // s7..s8
+    };
+    const std::uint8_t type = utf8d[byte];
+    codep = (state != 0) ? static_cast<std::uint32_t>((byte & 0x3Fu) | (codep << 6u))
+                         : static_cast<std::uint32_t>((0xFFu >> type) & byte);
+    state = utf8d[256u + state * 16u + type];
+    return state;
+}
+
+// 追加 JSON 字符串字面量（含引号与转义），语义同 nlohmann dump_escaped
+void append_json_string(std::string& out, const char* s, size_t n) {
+    out.push_back('"');
+    std::uint32_t codepoint = 0;
+    std::uint8_t state = 0;
+    size_t undumped = 0;   // 自上次 ACCEPT 以来追加的字节数
+    for (size_t i = 0; i < n; ++i) {
+        const auto byte = static_cast<std::uint8_t>(s[i]);
+        const std::uint8_t st = utf8_dfa_decode(state, codepoint, byte);
+        if (st == 1) {   // REJECT：丢弃半成品序列，替换 U+FFFD，当前字节重来
+            out.resize(out.size() - undumped);
+            if (undumped > 0)
+                --i;
+            out += "\xEF\xBF\xBD";
+            undumped = 0;
+            state = 0;
+            continue;
+        }
+        if (st != 0) {   // 中间态：暂存原始字节
+            out.push_back(static_cast<char>(byte));
+            ++undumped;
+            continue;
+        }
+        switch (codepoint) {
+        case 0x08: out += "\\b"; break;
+        case 0x09: out += "\\t"; break;
+        case 0x0A: out += "\\n"; break;
+        case 0x0C: out += "\\f"; break;
+        case 0x0D: out += "\\r"; break;
+        case 0x22: out += "\\\""; break;
+        case 0x5C: out += "\\\\"; break;
+        default:
+            if (codepoint <= 0x1F) {
+                char buf[7];
+                std::snprintf(buf, sizeof(buf), "\\u%04x",
+                              static_cast<unsigned>(codepoint));
+                out.append(buf, 6);
+            } else {
+                out.push_back(static_cast<char>(byte));
+            }
+        }
+        undumped = 0;
     }
-    out["file"] = file;
+    out.push_back('"');
+}
 
-    json proc;
-    proc["pid"]  = e.pid;
-    proc["uid"]  = (actor != nullptr) ? actor->uid : e.uid;
-    proc["gid"]  = (actor != nullptr) ? actor->gid : e.gid;
-    std::string comm(reinterpret_cast<const char*>(e.comm), sizeof(e.comm));
-    auto comm_end = comm.find('\0');
-    if (comm_end != std::string::npos) comm.resize(comm_end);
-    proc["comm"] = comm;
-    if (actor != nullptr && actor->ppid > 0)
-        proc["ppid"] = actor->ppid;
-    if (actor != nullptr && !actor->exe.empty())
-        proc["exe"] = actor->exe;
-    out["process"] = proc;
+inline void append_json_string(std::string& out, const std::string& s) {
+    append_json_string(out, s.data(), s.size());
+}
 
+inline void append_u64(std::string& out, unsigned long long v) {
+    char buf[20];
+    int len = std::snprintf(buf, sizeof(buf), "%llu", v);
+    out.append(buf, static_cast<size_t>(len));
+}
+
+}  // namespace
+
+// 文件事件落库 payload 直写（键序同 nlohmann map 序），同时回填 rec 索引列；
+// actor 为空（proc_watch 未启动）时 uid/gid 退回事件值、exe/container 省略、
+// ancestors 退回 Enricher 兜底（与 R10 前 enrich 路径一致）。
+static void render_file_payload(const struct event& e, struct EventRecord& rec,
+                                const FileActorContext* actor, Enricher* enr,
+                                std::string& out) {
+    out.clear();
+    out.reserve(512);
+    out.push_back('{');
     if (actor != nullptr && !actor->container_id.empty()) {
-        json c;
-        c["container_id"] = actor->container_id;
-        out["container"] = c;
+        out += "\"container\":{\"container_id\":";
+        append_json_string(out, actor->container_id);
+        out += "},";
     }
+    out += "\"event_type\":";
+    append_json_string(out, file_event_kind(e), std::strlen(file_event_kind(e)));
+
+    out += ",\"file\":{\"action\":";
+    append_json_string(out, actionToString(static_cast<Action>(e.action)));
+    out += ",\"ino\":";
+    append_u64(out, e.ino);
+    out += ",\"mask\":";
+    append_u64(out, static_cast<unsigned long long>(e.mask));
+    if (e.event_type == EVENT_CHOWN) {
+        out += ",\"new_gid\":";
+        append_u64(out, e.new_gid);
+    }
+    if (e.event_type == EVENT_CHMOD) {
+        out += ",\"new_mode\":";
+        append_json_string(out, mode_to_string(e.new_mode & 0777));
+    }
+    if (e.event_type == EVENT_CHOWN) {
+        out += ",\"new_uid\":";
+        append_u64(out, e.new_uid);
+    }
+    out += ",\"path\":";
+    append_json_string(out, file_event_path(e));
+
+    out += "},\"process\":{\"ancestors\":";
+    if (actor != nullptr)
+        out += actor->ancestors_json.empty() ? "[]" : actor->ancestors_json;
+    else if (enr != nullptr)
+        out += enr->ancestors_of(rec.pid, rec.ppid).dump();
+    else
+        out += "[]";
+    out += ",\"comm\":";
+    {
+        std::string comm(reinterpret_cast<const char*>(e.comm), sizeof(e.comm));
+        auto comm_end = comm.find('\0');
+        if (comm_end != std::string::npos)
+            comm.resize(comm_end);
+        append_json_string(out, comm);
+    }
+    if (actor != nullptr && !actor->exe.empty()) {
+        out += ",\"exe\":";
+        append_json_string(out, actor->exe);
+    }
+    out += ",\"gid\":";
+    append_u64(out, (actor != nullptr) ? actor->gid : e.gid);
+    out += ",\"pid\":";
+    append_u64(out, e.pid);
+    if (actor != nullptr && actor->ppid > 0) {
+        out += ",\"ppid\":";
+        append_u64(out, actor->ppid);
+    }
+    out += ",\"uid\":";
+    append_u64(out, (actor != nullptr) ? actor->uid : e.uid);
+    out += "},\"ts\":";
+    append_u64(out, rec.ts_ns);
+    out.push_back('}');
 
     rec.uid  = (actor != nullptr) ? actor->uid : e.uid;
     rec.ppid = (actor != nullptr) ? actor->ppid : 0;
@@ -948,10 +1169,10 @@ static void route_event(EventRecord& rec, TelemetryRuntime* rt) {
             // 读/写（file_permission）事件 event_type=0，按 mask 归一 action 便于检索
             if (fe.event_type == 0)
                 rec.action = (fe.mask & EVENT_WRITE) ? EVENT_WRITE : EVENT_READ;
-            json j;
-            render_file_event(fe, rec, j, actor_ptr);
-            rt->enricher->enrich(rec, j);
-            const std::string payload = j.dump();
+            // R10：payload 直写 JSON（与 nlohmann dump 逐字节一致），
+            // 祖先链用 build_file_actor 预序列化串；actor 为空退回 Enricher 兜底
+            thread_local std::string payload;   // 仅消费线程，复用缓冲
+            render_file_payload(fe, rec, actor_ptr, rt->enricher, payload);
             record_set_str(rec.payload_json, sizeof(rec.payload_json),
                            payload.c_str(), payload.size());
             rt->store->Append(rec);
@@ -1078,6 +1299,9 @@ static void telemetry_consumer_main(TelemetryRuntime* rt) {
             last_drop = now;
         }
 
+        // 用户态计数器的周期同步在主循环做（本线程内层 pop 循环在高压下
+        // 不退出，周期任务会被饿死）；此处只保留退出后的最终同步。
+
         // tombstone sweep：每 60s
         if (now - last_sweep >= 60000000000ULL) {
             rt->tree->sweep_tombstones();
@@ -1105,6 +1329,8 @@ static void telemetry_consumer_main(TelemetryRuntime* rt) {
         route_event(rec, rt);
     if (rt->store)
         rt->store->Flush();
+    // drain + 落库收尾后最终同步一次计数器（对账读取的最终状态）
+    sync_user_stats(rt->user_stats_fd, rt->bus, rt->store, rt->mctx);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1148,13 +1374,13 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
 
     // Pin maps
     (void)mkdir("/sys/fs/bpf/baseline-guard", 0755);
-    if (int err = bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats"))
-        spdlog::warn("[bpf_map_pin] failed to pin drop_stats: {}", strerror(-err));
-    if (int err = bpf_map__pin(skel->maps.watermark_level, "/sys/fs/bpf/baseline-guard/watermark_level"))
-        spdlog::warn("[bpf_map_pin] failed to pin watermark_level: {}", strerror(-err));
+    pin_map_best_effort(skel->maps.drop_stats, DROP_STATS_PIN_PATH);
+    pin_map_best_effort(skel->maps.watermark_level, "/sys/fs/bpf/baseline-guard/watermark_level");
+    pin_map_best_effort(skel->maps.user_stats, USER_STATS_PIN_PATH);
 
     int fd_actions   = bpf_map__fd(skel->maps.monitor_actions);
     int fd_watermark = bpf_map__fd(skel->maps.watermark_level);
+    int fd_ustats    = bpf_map__fd(skel->maps.user_stats);
 
     BaselineDB* baseline_db = nullptr;
     common_monitor_init(fd_actions, config, baseline_db_path, skip_boot_check, alert_mgr, baseline_db);
@@ -1204,6 +1430,7 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
     rt.proc_tree_on = (proc_skel != nullptr);
     rt.running   = &running;
     rt.alert_mgr = &alert_mgr;
+    rt.user_stats_fd = fd_ustats;
     std::thread consumer_thread(telemetry_consumer_main, &rt);
 
     spdlog::info("Monitoring started (ring buffer mode). Press Ctrl+C to stop.");
@@ -1279,10 +1506,9 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
         }
     }
 
-    int count = 0;
-    const int WATERMARK_INTERVAL = 100;
+    unsigned long long last_watermark_ns = now_monotonic_ns();
+    unsigned long long last_ustats_ns    = now_monotonic_ns();
     while (running) {
-        count++;
         if (epollfd >= 0) {
             struct epoll_event evs[8];
             int n = epoll_wait(epollfd, evs, 8, 100);
@@ -1306,11 +1532,23 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
             }
         }
 
-        if (count % WATERMARK_INTERVAL == 0) {
+        // 周期任务按时间触发（原按循环次数：高压下循环极快，触发频率远超设计
+        // 语义，水位计算遍历全部 CPU ring + 16 次 map 更新会卡住 ring 消费，
+        // 压测窗口 burst 期间导致内核 reserve 失败丢事件）
+        const unsigned long long loop_now = now_monotonic_ns();
+        if (loop_now - last_watermark_ns >= 1000000000ULL) {   // 1s
             backpressure.UpdateUtilization();
             __u32 wm_key   = 0;
             __u32 wm_value = static_cast<__u32>(backpressure.GetWatermarkLevel());
             bpf_map_update_elem(fd_watermark, &wm_key, &wm_value, BPF_ANY);
+            last_watermark_ns = loop_now;
+        }
+
+        // 用户态计数器暴露：主循环周期同步（消费线程内层 pop 循环在高压下
+        // 不退出，在那里同步会被饿死）。读 store 计数为跨线程近似读，仅用于可观测。
+        if (loop_now - last_ustats_ns >= 1000000000ULL) {      // 1s
+            sync_user_stats(fd_ustats, &bus, store, &mctx);
+            last_ustats_ns = loop_now;
         }
 
         // SIGHUP 热加载：handler 只置标志，此处每轮检查（成功替换快照，失败保留旧配置）
@@ -1343,6 +1581,7 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
 
     bpf_map__unpin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
     bpf_map__unpin(skel->maps.watermark_level, "/sys/fs/bpf/baseline-guard/watermark_level");
+    bpf_map__unpin(skel->maps.user_stats, "/sys/fs/bpf/baseline-guard/user_stats");
     lsm_file_bpf__destroy(skel);
 
     delete store;
@@ -1394,8 +1633,8 @@ static int do_monitor_perf(const Config& config, AlertManager &alert_mgr,
 
     // Pin drop_stats
     (void)mkdir("/sys/fs/bpf/baseline-guard", 0755);
-    if (int err = bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats"))
-        spdlog::warn("[bpf_map_pin] failed to pin drop_stats: {}", strerror(-err));
+    pin_map_best_effort(skel->maps.drop_stats, DROP_STATS_PIN_PATH);
+    pin_map_best_effort(skel->maps.user_stats, USER_STATS_PIN_PATH);
 
     int fd_actions = bpf_map__fd(skel->maps.monitor_actions);
 
@@ -1405,6 +1644,7 @@ static int do_monitor_perf(const Config& config, AlertManager &alert_mgr,
     // 无水位背压（perf buffer 无利用率查询）
     MonitorContext mctx;
     mctx.alert_mgr = &alert_mgr;
+    mctx.user_stats_fd = bpf_map__fd(skel->maps.user_stats);
 
     spdlog::info("Monitoring started (perf buffer mode). Press Ctrl+C to stop.");
 
@@ -1425,6 +1665,7 @@ static int do_monitor_perf(const Config& config, AlertManager &alert_mgr,
     perf_buffer__free(pb);
 
     bpf_map__unpin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
+    bpf_map__unpin(skel->maps.user_stats, "/sys/fs/bpf/baseline-guard/user_stats");
     lsm_file_perf_bpf__destroy(skel);
 
     if (baseline_db) {
@@ -1482,8 +1723,8 @@ static int do_monitor_kprobe(const Config& config, AlertManager &alert_mgr,
 
     // Pin drop_stats
     (void)mkdir("/sys/fs/bpf/baseline-guard", 0755);
-    if (int err = bpf_map__pin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats"))
-        spdlog::warn("[bpf_map_pin] failed to pin drop_stats: {}", strerror(-err));
+    pin_map_best_effort(skel->maps.drop_stats, DROP_STATS_PIN_PATH);
+    pin_map_best_effort(skel->maps.user_stats, USER_STATS_PIN_PATH);
 
     int fd_actions = bpf_map__fd(skel->maps.monitor_actions);
 
@@ -1492,6 +1733,7 @@ static int do_monitor_kprobe(const Config& config, AlertManager &alert_mgr,
 
     MonitorContext mctx;
     mctx.alert_mgr = &alert_mgr;
+    mctx.user_stats_fd = bpf_map__fd(skel->maps.user_stats);
 
     spdlog::info("Monitoring started (kprobe mode, alert-only). Press Ctrl+C to stop.");
 
@@ -1517,6 +1759,7 @@ static int do_monitor_kprobe(const Config& config, AlertManager &alert_mgr,
     perf_buffer__free(pb);
 
     bpf_map__unpin(skel->maps.drop_stats, "/sys/fs/bpf/baseline-guard/drop_stats");
+    bpf_map__unpin(skel->maps.user_stats, "/sys/fs/bpf/baseline-guard/user_stats");
     bpf_link__destroy(link_perm);
     bpf_link__destroy(link_chmod);
     bpf_link__destroy(link_chown);

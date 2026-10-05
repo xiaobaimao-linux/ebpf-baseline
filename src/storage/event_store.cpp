@@ -318,10 +318,12 @@ void EventStore::WriteBatch() {
     if (sqlite3_exec(db_, "BEGIN;", nullptr, nullptr, &err) != SQLITE_OK) {
         sqlite3_free(err);
         spdlog::error("[event_store] BEGIN failed: {}", sqlite3_errmsg(db_));
+        failed_ += pending_.size();
         return;
     }
 
     const unsigned long long flush_ts = now_ns();
+    unsigned long long batch_stored = 0;
     for (const auto& row : pending_) {
         sqlite3_bind_text(insert_stmt_, 1, row.event_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(insert_stmt_, 2, static_cast<long long>(row.ts_ns));
@@ -342,6 +344,7 @@ void EventStore::WriteBatch() {
             spdlog::error("[event_store] insert failed: {}", sqlite3_errmsg(db_));
             sqlite3_reset(insert_stmt_);
             sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+            failed_ += pending_.size();   // 整批回滚，全部计入丢失
             return;
         }
         sqlite3_reset(insert_stmt_);
@@ -349,11 +352,14 @@ void EventStore::WriteBatch() {
         // 端到端延迟：落库完成时间 - 事件时间
         if (flush_ts >= row.ts_ns)
             e2e_lat_.add(flush_ts - row.ts_ns);
-        stored_++;
+        batch_stored++;
     }
 
     if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, &err) != SQLITE_OK) {
         sqlite3_free(err);
         spdlog::error("[event_store] COMMIT failed: {}", sqlite3_errmsg(db_));
+        failed_ += pending_.size();   // COMMIT 失败整批未落库
+        return;
     }
+    stored_ += batch_stored;   // COMMIT 成功才计入，避免 ROLLBACK 虚增
 }

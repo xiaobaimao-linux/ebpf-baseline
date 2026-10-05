@@ -23,6 +23,7 @@
  *     parent_pid），不追溯祖先进程。
  */
 #include "proc_event.h"
+#include "stats_slots.h"
 /* vmlinux.h 内含内核 struct proc_event（proc connector 事件，见 include/linux/
  * proc_connector.h），与 proc_event.h 的用户态事件定义重名冲突；包含 vmlinux.h
  * 前宏改名为 kern_proc_event 规避（内核侧仅此一处定义，无其他引用点，安全）。 */
@@ -40,17 +41,25 @@ struct {
     __uint(max_entries, 1 << 22);
 } proc_events SEC(".maps");
 
-/* ── per-CPU 丢包统计 ─────────────────────────────────────────── */
+/* ── per-CPU 丢包/对账统计（槽位定义见 stats_slots.h）────────────── */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
+    __uint(max_entries, DROP_STATS_SLOTS);
     __type(key, __u32);
     __type(value, __u64);
 } proc_drop_stats SEC(".maps");
 
 static __always_inline void inc_proc_drop_count(void)
 {
-    __u32 key = 0;
+    __u32 key = DROP_SLOT_RESERVE_FAIL;
+    __u64 *cnt = bpf_map_lookup_elem(&proc_drop_stats, &key);
+    if (cnt)
+        (*cnt)++;
+}
+
+static __always_inline void inc_proc_emitted_count(void)
+{
+    __u32 key = DROP_SLOT_EMITTED;
     __u64 *cnt = bpf_map_lookup_elem(&proc_drop_stats, &key);
     if (cnt)
         (*cnt)++;
@@ -113,6 +122,7 @@ int tp_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx)
     }
 
     bpf_ringbuf_submit(e, 0);
+    inc_proc_emitted_count();
     return 0;
 }
 
@@ -139,6 +149,7 @@ int tp_sched_process_exec(struct trace_event_raw_sched_process_exec *ctx)
         bpf_probe_read_kernel_str(e->exe, sizeof(e->exe), (void *)ctx + off);
 
     bpf_ringbuf_submit(e, 0);
+    inc_proc_emitted_count();
     return 0;
 }
 
@@ -160,6 +171,7 @@ int tp_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     e->pid  = (__u32)ctx->pid;
 
     bpf_ringbuf_submit(e, 0);
+    inc_proc_emitted_count();
     return 0;
 }
 

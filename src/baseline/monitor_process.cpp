@@ -1,5 +1,7 @@
 #include "monitor_process.hpp"
 
+#include <unistd.h>
+
 #include <cstring>
 #include <string>
 #include <vector>
@@ -13,6 +15,7 @@
 #include "event_bus.hpp"
 #include "event_record.hpp"
 #include "proc_event.h"
+#include "stats_slots.h"
 
 // 包含生成的skeleton头文件（经 -I. 从仓库根目录引用 bpf/）
 #include "bpf/proc_watch.skel.h"
@@ -113,6 +116,11 @@ struct proc_watch_bpf *process_monitor_start(struct ring_buffer **rb_out, EventB
     }
     spdlog::info("[bpf_program_loaded] proc_watch attached (fork/exec/exit)");
 
+    // pin 丢包计数 map 供 stats --drop 读取（先 unlink 清陈旧 pin）
+    unlink(PROC_DROP_STATS_PIN_PATH);
+    if (int err = bpf_map__pin(skel->maps.proc_drop_stats, PROC_DROP_STATS_PIN_PATH))
+        spdlog::warn("[bpf_map_pin] failed to pin proc_drop_stats: {}", strerror(-err));
+
     rb = ring_buffer__new(bpf_map__fd(skel->maps.proc_events), handle_process_event, bus, nullptr);
     if (!rb) {
         spdlog::error("[bpf_program_error] Failed to create proc_events ring buffer");
@@ -146,6 +154,7 @@ void process_monitor_stop(struct proc_watch_bpf *skel, struct ring_buffer *rb)
 
     if (rb)
         ring_buffer__free(rb);
+    bpf_map__unpin(skel->maps.proc_drop_stats, PROC_DROP_STATS_PIN_PATH);
     proc_watch_bpf__destroy(skel);
     spdlog::info("[service_stop] proc_watch stopped");
 }

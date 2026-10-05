@@ -16,6 +16,7 @@
 #include "event_bus.hpp"
 #include "event_record.hpp"
 #include "net_event.h"
+#include "stats_slots.h"
 
 // 包含生成的skeleton头文件（经 -I. 从仓库根目录引用 bpf/）
 #include "bpf/net_watch.skel.h"
@@ -209,6 +210,11 @@ struct net_watch_bpf *network_monitor_start(struct ring_buffer **rb_out,
     spdlog::info("[bpf_program_loaded] net_watch attached (conn={} dns={})",
                  enable_conn ? "on" : "off", enable_dns ? "on(sendto/sendmsg/sendmmsg)" : "off");
 
+    // pin 丢包计数 map 供 stats --drop 读取（先 unlink 清陈旧 pin）
+    unlink(NET_DROP_STATS_PIN_PATH);
+    if (int err = bpf_map__pin(skel->maps.net_drop_stats, NET_DROP_STATS_PIN_PATH))
+        spdlog::warn("[bpf_map_pin] failed to pin net_drop_stats: {}", strerror(-err));
+
     rb = ring_buffer__new(bpf_map__fd(skel->maps.net_events), handle_network_event, bus, nullptr);
     if (!rb) {
         spdlog::error("[bpf_program_error] Failed to create net_events ring buffer");
@@ -242,6 +248,7 @@ void network_monitor_stop(struct net_watch_bpf *skel, struct ring_buffer *rb)
 
     if (rb)
         ring_buffer__free(rb);
+    bpf_map__unpin(skel->maps.net_drop_stats, NET_DROP_STATS_PIN_PATH);
     net_watch_bpf__destroy(skel);
     spdlog::info("[service_stop] net_watch stopped");
 }

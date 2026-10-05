@@ -16,6 +16,7 @@
 #include "event_bus.hpp"
 #include "event_record.hpp"
 #include "priv_event.h"
+#include "stats_slots.h"
 
 // 包含生成的skeleton头文件（经 -I. 从仓库根目录引用 bpf/）
 #include "bpf/priv_watch.skel.h"
@@ -300,6 +301,11 @@ struct priv_watch_bpf *privilege_monitor_start(struct ring_buffer **rb_out, Even
     }
     spdlog::info("[bpf_program_loaded] priv_watch attached (setuid/setgid/capset/ptrace/module_load/mount/unshare/setns)");
 
+    // pin 丢包计数 map 供 stats --drop 读取（先 unlink 清陈旧 pin）
+    unlink(PRIV_DROP_STATS_PIN_PATH);
+    if (int err = bpf_map__pin(skel->maps.priv_drop_stats, PRIV_DROP_STATS_PIN_PATH))
+        spdlog::warn("[bpf_map_pin] failed to pin priv_drop_stats: {}", strerror(-err));
+
     rb = ring_buffer__new(bpf_map__fd(skel->maps.priv_events), handle_privilege_event, bus, nullptr);
     if (!rb) {
         spdlog::error("[bpf_program_error] Failed to create priv_events ring buffer");
@@ -333,6 +339,7 @@ void privilege_monitor_stop(struct priv_watch_bpf *skel, struct ring_buffer *rb)
 
     if (rb)
         ring_buffer__free(rb);
+    bpf_map__unpin(skel->maps.priv_drop_stats, PRIV_DROP_STATS_PIN_PATH);
     priv_watch_bpf__destroy(skel);
     spdlog::info("[service_stop] priv_watch stopped");
 }

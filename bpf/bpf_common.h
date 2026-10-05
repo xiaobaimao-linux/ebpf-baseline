@@ -24,21 +24,34 @@ struct {
     __type(value, struct monitor_rule);
 } monitor_actions SEC(".maps");
 
-/* ── per-CPU 丢包统计 ─────────────────────────────────────────── */
+/* ── per-CPU 丢包/对账统计（槽位定义见 stats_slots.h）────────────── */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
+    __uint(max_entries, DROP_STATS_SLOTS);
     __type(key, __u32);
     __type(value, __u64);
 } drop_stats SEC(".maps");
 
-static __always_inline void inc_drop_count(void)
+static __always_inline void inc_drop_slot(__u32 slot)
 {
-    __u32 key = 0;
-    __u64 *cnt = bpf_map_lookup_elem(&drop_stats, &key);
+    __u64 *cnt = bpf_map_lookup_elem(&drop_stats, &slot);
     if (cnt)
         (*cnt)++;
 }
+
+/* 背压主动 DROP（保持原计数语义不变） */
+static __always_inline void inc_drop_count(void)
+{
+    inc_drop_slot(DROP_SLOT_BACKPRESSURE);
+}
+
+/* ── 用户态计数器中转 map：monitor 周期写入，stats 命令经 pin 读取 ── */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, USER_STATS_SLOTS);
+    __type(key, __u32);
+    __type(value, __u64);
+} user_stats SEC(".maps");
 
 /* ══════════════════════════════════════════════════════════════════
  * 事件传输层：根据编译模式选择 ring buffer 或 perf buffer
@@ -137,11 +150,11 @@ static __always_inline int emit_attr_event(void *ctx,
 #ifdef USE_PERF_BUFFER
     __u32 _zero = 0;
     struct event *e = bpf_map_lookup_elem(&perf_event_buf, &_zero);
-    if (!e) { inc_drop_count(); return -1; }
+    if (!e) { inc_drop_slot(DROP_SLOT_RESERVE_FAIL); return -1; }
     __builtin_memset(e, 0, sizeof(*e));
 #else
     struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e) { inc_drop_count(); return -1; }
+    if (!e) { inc_drop_slot(DROP_SLOT_RESERVE_FAIL); return -1; }
     __builtin_memset(e, 0, sizeof(*e));
 #endif
 
@@ -173,9 +186,14 @@ static __always_inline int emit_attr_event(void *ctx,
         bpf_core_read_str(e->path, sizeof(e->path), name_ptr);
 
 #ifdef USE_PERF_BUFFER
-    submit_event(ctx, e, bp_decision);
+    /* perf output 失败（buffer 满等）即传输层丢失，计入 reserve_fail 槽 */
+    if (submit_event(ctx, e, bp_decision) == 0)
+        inc_drop_slot(DROP_SLOT_EMITTED);
+    else
+        inc_drop_slot(DROP_SLOT_RESERVE_FAIL);
 #else
     bpf_ringbuf_submit(e, bp_decision == BACKPRESSURE_BATCH ? BPF_RB_NO_WAKEUP : 0);
+    inc_drop_slot(DROP_SLOT_EMITTED);
 #endif
     return 0;
 }
