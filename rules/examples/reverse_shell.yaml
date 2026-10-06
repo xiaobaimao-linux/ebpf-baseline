@@ -1,0 +1,11 @@
+# 反弹 shell：Web 服务进程派生 shell
+# v1 无 stdin/socket fd 关联能力（事件 schema 不含 fd 信息），以父进程链判定；
+# 待 W6+ 支持跨事件关联后可补充 socket 关联条件。
+- rule: Reverse Shell From Web Service
+  desc: Web 服务进程派生交互式 shell，疑似反弹 shell
+  condition: event_type = process.exec and process.exe in (/bin/bash, /bin/sh, /usr/bin/bash, /usr/bin/sh, /bin/dash, /usr/bin/dash, /bin/zsh, /usr/bin/zsh) and process.ancestors[].comm in (nginx, apache2, httpd, php-fpm, php, node, java, gunicorn, uwsgi)
+  output: "疑似反弹 shell (rule=%rule.name exe=%process.exe pid=%process.pid ppid=%process.ppid uid=%process.uid container=%container.container_id)"
+  priority: critical
+  attack: [T1059, TA0002]
+  fpr_note: 运维通过 Web 控制台/CI 任务在 Web 服务下执行脚本时可能命中；确认是已知发布流程后可将该部署工具的祖先 comm 从列表移除或收窄 shell 列表
+  response: 立即排查该 shell 的后续网络外联（network.connect）与父进程 Web 服务的入侵痕迹；确认为攻击后隔离主机、重建 Web 服务容器/镜像

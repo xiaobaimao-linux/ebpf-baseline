@@ -37,11 +37,19 @@ struct TelemetryConfig {
 };
 
 
+// 规则引擎配置（独立节点 rule_engine:，DSL 规则见 docs/rule-dsl-v1.md）
+struct RuleEngineConfig {
+    bool enabled = true;               // DSL 规则引擎开关，默认开启
+    std::string rules_dir = "rules";   // 规则目录（*.yaml/*.yml 全量加载）
+};
+
+
 struct Config {
     std::vector<Rule> rules;
     AlertConfig alert;   // 
     DbConfig db;         // 数据库保留策略配置
     TelemetryConfig telemetry;  // 遥测开关
+    RuleEngineConfig rule_engine;  // DSL 规则引擎
 };
 
 

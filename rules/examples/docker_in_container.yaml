@@ -1,0 +1,11 @@
+# 容器内执行 docker：逃逸嫌疑
+# 命中前提：容器挂载了 /var/run/docker.sock（或宿主 PID/特权配置），
+# 容器内 docker CLI 可直接操控宿主守护进程
+- rule: Docker CLI Executed Inside Container
+  desc: 容器内执行 docker 客户端，疑似通过挂载的 docker.sock 操作宿主机（逃逸嫌疑）
+  condition: event_type = process.exec and container.container_id != "" and process.exe in (/usr/bin/docker, /bin/docker, /usr/local/bin/docker, /usr/bin/dockerd)
+  output: "容器内执行 docker (rule=%rule.name exe=%process.exe pid=%process.pid uid=%process.uid container=%container.container_id)"
+  priority: critical
+  attack: [T1609, T1611]
+  fpr_note: CI 构建容器（挂载 docker.sock 的 builder）属预期行为，会高频命中；此类场景建议按容器镜像维度建例外（v1 无镜像字段，可临时改用 exe 更精确路径或关闭本规则）
+  response: 确认该容器是否业务所需的构建容器；非预期则立即停容器、审计 docker.sock 挂载来源与宿主机 docker 事件，检查是否已创建特权容器完成逃逸

@@ -2,6 +2,7 @@
 #include <string>
 #include <unordered_map>
 #include <chrono>
+#include <cstdint>
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 #include "baseline_db.hpp"
@@ -46,6 +47,7 @@ struct AlertEvent {
     std::string exe;            // 触发进程可执行文件路径（进程树命中时非空）
     std::string container_id;   // 12 位容器短 ID（容器内触发时非空）
     std::string ancestors;      // 祖先链 JSON 数组串（可为空）
+    std::string attack;         // ATT&CK 技术 ID 逗号分隔（W4 DSL 规则；FIM/基线告警为空串）
 };
 
 class AlertManager {
@@ -73,6 +75,23 @@ public:
     // 返回删除的记录数
     int RunRetention();
 
+    // 节流抑制统计（M5-3 "已抑制 N 条" 对账口径）：节流窗口内被跳过的告警数。
+    // 单线程读写（消费线程），与 IsThrottled 同一调用上下文。
+    uint64_t ThrottledTotal() const { return throttled_total_; }
+    uint64_t ThrottledCount(const std::string& rule_id) const {
+        auto it = throttled_by_rule_.find(rule_id);
+        return it == throttled_by_rule_.end() ? 0 : it->second;
+    }
+    const std::unordered_map<std::string, uint64_t>& ThrottledByRule() const {
+        return throttled_by_rule_;
+    }
+    // 预检路径（ThrottledNow 命中即提前返回、不走 SendDingTalk）的抑制计数入口；
+    // SendDingTalk 内部节流分支用同一入口，保证每条被抑制告警恰好计一次。
+    void NoteThrottled(const std::string& rule_id) {
+        throttled_total_++;
+        throttled_by_rule_[rule_id]++;
+    }
+
 private:
     std::string dingtalk_url_;
     std::string dingtalk_secret_;
@@ -83,6 +102,10 @@ private:
 
     // 记录每条规则最近一次告警时间: rule_id -> 上次告警时间点
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_alert_time_;
+
+    // 节流抑制计数（被节流跳过的告警）：总数 + 按规则
+    uint64_t throttled_total_ = 0;
+    std::unordered_map<std::string, uint64_t> throttled_by_rule_;
 
     static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp);
     bool PostJson(const std::string& url, const json& payload);

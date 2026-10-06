@@ -15,6 +15,8 @@
 #include "event_store.hpp"
 #include "process_tree.hpp"
 #include "enricher.hpp"
+#include "rule_engine.hpp"
+#include "rule_loader.hpp"
 #include "net_event.h"
 #include "priv_event.h"
 #include "proc_event.h"
@@ -158,8 +160,35 @@ static std::shared_ptr<FileRuleTable> g_file_rules = std::make_shared<FileRuleTa
 // 白名单不可变快照，与规则表同锁替换：读侧持锁取 const 引用，匹配无锁读表
 static std::shared_ptr<const WhitelistTable> g_whitelist_table =
     std::make_shared<const WhitelistTable>();
+// DSL 规则引擎快照（W4）：与 FileRuleTable 同锁整代替换；空引擎求值一次分支即返回
+static std::shared_ptr<const detect::RuleEngine> g_rule_engine =
+    std::make_shared<const detect::RuleEngine>();
 static std::shared_mutex g_file_rules_mtx;
 static WhitelistMatcher g_whitelist_matcher;
+
+// 消费线程取引擎快照（shared_ptr 拷贝，锁内一次原子增减）
+static std::shared_ptr<const detect::RuleEngine> rule_engine_snapshot() {
+    std::shared_lock<std::shared_mutex> lk(g_file_rules_mtx);
+    return g_rule_engine;
+}
+
+// 启动/热加载共用：严格加载 rules_dir 并编译引擎；失败返回 nullptr（调用方保留旧快照）
+static std::shared_ptr<const detect::RuleEngine> build_rule_engine(const RuleEngineConfig& cfg) {
+    if (!cfg.enabled)
+        return std::make_shared<const detect::RuleEngine>();
+    std::vector<detect::Rule> rules;
+    std::string err;
+    if (!detect::LoadRulesDir(cfg.rules_dir, rules, err)) {
+        spdlog::error("[rule_engine] 规则加载失败: {}", err);
+        return nullptr;
+    }
+    auto engine = std::make_shared<detect::RuleEngine>();
+    if (!engine->Build(std::move(rules), err)) {
+        spdlog::error("[rule_engine] 规则编译失败: {}", err);
+        return nullptr;
+    }
+    return engine;
+}
 
 // 基线实时监控映射：inode -> CheckEntry（仅当 --db 模式下非空；启动时构建，热加载不变更）
 std::unordered_map<unsigned long, CheckEntry> g_inode_to_baseline;
@@ -183,20 +212,33 @@ static void reload_monitor_config(const std::string& config_path) {
     compute_inodes(new_config);
     auto new_rules = FileRuleTable::Build(new_config);
     auto new_wl = WhitelistTable::Build(new_config);
+    // 规则引擎同步整代替换：加载失败整体保留旧快照（文件规则表也不换）
+    auto new_engine = build_rule_engine(new_config.rule_engine);
+    if (new_engine == nullptr) {
+        spdlog::error("[config_reload] 规则引擎加载失败，保留旧配置");
+        return;
+    }
     {
         std::unique_lock<std::shared_mutex> lk(g_file_rules_mtx);
         g_file_rules = std::move(new_rules);
         g_whitelist_table = std::move(new_wl);
+        g_rule_engine = std::move(new_engine);
     }
     g_whitelist_matcher.ClearCache();
     spdlog::info("config reloaded ({} rules)", new_config.rules.size());
 }
 
-// 60s 周期：各 rule 白名单抑制计数增量打一行 info（无增量不打）
-static void log_suppressed_stats() {
+// 60s 周期：各 rule 白名单抑制计数增量打一行 info（无增量不打）；
+// 附告警节流抑制累计（M5-3 "已抑制 N 条" 对账口径，自进程启动累计不重置）。
+static void log_suppressed_stats(const AlertManager* alert_mgr = nullptr) {
     for (const auto& [rule_id, n] : g_whitelist_matcher.GetAndResetSuppressed()) {
         if (n > 0)
             spdlog::info("[whitelist] suppressed: rule={} count={}", rule_id, n);
+    }
+    if (alert_mgr != nullptr && alert_mgr->ThrottledTotal() > 0) {
+        spdlog::info("[alerts] throttled: total={}", alert_mgr->ThrottledTotal());
+        for (const auto& [rule_id, n] : alert_mgr->ThrottledByRule())
+            spdlog::info("[alerts] throttled: rule={} count={}", rule_id, n);
     }
 }
 
@@ -227,9 +269,12 @@ void on_violation_detected(const Rule& rule,
                  uid.empty() ? "-" : uid);
 
     // 2. 节流窗口内不构建 AlertEvent：SendDingTalk 本来就不发不存，
-    //    构建（含 ancestors JSON dump / NowString）纯属浪费（高频事件路径实测热点）
-    if (alert_mgr.ThrottledNow(rule.id))
+    //    构建（含 ancestors JSON dump / NowString）纯属浪费（高频事件路径实测热点）；
+    //    抑制计数在此入口记（不经 SendDingTalk，不会双计）
+    if (alert_mgr.ThrottledNow(rule.id)) {
+        alert_mgr.NoteThrottled(rule.id);
         return;
+    }
 
     // 3. 发钉钉 + 自动落库（AlertManager 内部统一处理）
     AlertEvent evt;
@@ -873,7 +918,7 @@ static int run_perf_buffer_loop(struct perf_buffer *pb,
             (void)deleted;
         }
         if (count % WL_STATS_INTERVAL == 0) {
-            log_suppressed_stats();
+            log_suppressed_stats(&alert_mgr);
         }
     }
 
@@ -1177,6 +1222,172 @@ static void render_file_payload(const struct event& e, struct EventRecord& rec,
     }
 }
 
+// ── DSL 规则引擎接入（W4 D4）：仅消费线程调用，引擎快照只读 ─────────
+// rule_id = "dsl." + slug（小写字母数字保留，其余折叠为单个 '_'）
+static std::string dsl_rule_id(const std::string& name) {
+    std::string id = "dsl.";
+    bool last_us = false;
+    for (const unsigned char c : name) {
+        if (std::isalnum(c)) {
+            id += static_cast<char>(std::tolower(c));
+            last_us = false;
+        } else if (!last_us) {
+            id += '_';
+            last_us = true;
+        }
+    }
+    while (!id.empty() && id.back() == '_')
+        id.pop_back();
+    return id;
+}
+
+// 祖先链 json [{pid,comm,exe}] → EventView 视图（string_view 引用 json 内部
+// 存储，事件处理期内有效）
+static void fill_ancestors_view(const json& anc, std::vector<detect::AncestorView>& out) {
+    out.clear();
+    if (!anc.is_array())
+        return;
+    for (const auto& a : anc) {
+        detect::AncestorView av;
+        if (a.contains("pid") && a["pid"].is_number())
+            av.pid = a["pid"].get<long long>();
+        if (a.contains("comm") && a["comm"].is_string()) {
+            const auto& s = a["comm"].get_ref<const std::string&>();
+            av.comm = std::string_view(s.data(), s.size());
+        }
+        if (a.contains("exe") && a["exe"].is_string()) {
+            const auto& s = a["exe"].get_ref<const std::string&>();
+            av.exe = std::string_view(s.data(), s.size());
+        }
+        out.push_back(av);
+    }
+}
+
+// 命中后构造 AlertEvent 走 AlertManager 统一入口（节流/落库/钉钉与 FIM 一致）
+static void send_dsl_alert(const detect::Rule& rule, const std::string& output,
+                           const detect::EventView& view, const std::string& file_path,
+                           const std::string& user_name, const std::string& ancestors_json,
+                           AlertManager* alert_mgr) {
+    const std::string rule_id = dsl_rule_id(rule.name);
+    // 节流窗口内跳过 AlertEvent 构建（与 on_violation_detected 同一考量）；
+    // 抑制计数在此入口记（不经 SendDingTalk，不会双计）
+    if (alert_mgr->ThrottledNow(rule_id)) {
+        alert_mgr->NoteThrottled(rule_id);
+        return;
+    }
+
+    AlertEvent evt;
+    evt.rule_id      = rule_id;
+    evt.rule_name    = rule.name;
+    evt.severity     = rule.priority;
+    evt.file_path    = file_path;    // alerts.file_path 列 NOT NULL：file 事件取路径，exec 取 exe
+    evt.actual       = output;
+    evt.process_name = std::string(view.comm);
+    evt.pid          = static_cast<int>(view.pid);
+    evt.user_name    = user_name;
+    evt.uid          = std::to_string(view.uid);
+    evt.timestamp    = NowString();
+    evt.event_type   = std::string(view.event_type);
+    evt.action_taken = "alert";
+    evt.exe          = std::string(view.exe);
+    evt.container_id = std::string(view.container_id);
+    evt.ancestors    = ancestors_json;
+    for (size_t i = 0; i < rule.attack.size(); ++i) {
+        if (i > 0)
+            evt.attack += ',';
+        evt.attack += rule.attack[i];
+    }
+    alert_mgr->SendDingTalk(evt);
+}
+
+// 文件事件求值：CAT_FILE 分支 build_file_actor 之后、store->Append 之前调用
+static void eval_rules_on_file_event(const struct event& fe, const FileActorContext* actor,
+                                     TelemetryRuntime* rt) {
+    const auto engine = rule_engine_snapshot();
+    if (engine->rule_count() == 0 || rt->alert_mgr == nullptr)
+        return;
+
+    const std::string path = file_event_path(fe);
+    const std::string action = actionToString(static_cast<Action>(fe.action));
+    std::string new_mode;
+    if (fe.event_type == EVENT_CHMOD)
+        new_mode = mode_to_string(fe.new_mode & 0777);
+
+    detect::EventView view;
+    view.event_type = file_event_kind(fe);
+    view.pid  = fe.pid;
+    view.ppid = (actor != nullptr) ? actor->ppid : 0;
+    view.uid  = (actor != nullptr) ? actor->uid : fe.uid;
+    view.gid  = (actor != nullptr) ? actor->gid : fe.gid;
+    view.comm = std::string_view(fe.comm, strnlen(fe.comm, sizeof(fe.comm)));
+    if (actor != nullptr) {
+        view.exe = actor->exe;
+        view.container_id = actor->container_id;
+    }
+    view.has_file = true;
+    view.file_path   = path;
+    view.file_action = action;
+    view.file_new_mode = new_mode;
+    view.file_ino     = static_cast<long long>(fe.ino);
+    view.file_mask    = fe.mask;
+    view.file_new_uid = fe.new_uid;
+    view.file_new_gid = fe.new_gid;
+    if (actor != nullptr && actor->ancestors != nullptr)
+        fill_ancestors_view(*actor->ancestors, view.ancestors);
+
+    detect::MatchResult m;
+    if (!engine->Evaluate(view, m))
+        return;
+
+    std::string user_name;
+    if (actor != nullptr) {
+        user_name = actor->user_name;
+    } else {
+        std::string uid_str;
+        user_name = ResolveUserInfoByPid(static_cast<int>(fe.pid), uid_str);
+    }
+    send_dsl_alert(*m.rule, m.output, view, path, user_name,
+                   (actor != nullptr) ? actor->ancestors_json : std::string(),
+                   rt->alert_mgr);
+}
+
+// exec 事件求值：CAT_PROCESS 分支 tree->apply 之后调用（不依赖 store 开关）
+static void eval_rules_on_exec_event(const struct proc_event& pe, TelemetryRuntime* rt) {
+    const auto engine = rule_engine_snapshot();
+    if (engine->rule_count() == 0 || rt->alert_mgr == nullptr)
+        return;
+
+    std::string exe;
+    std::string container_id;
+    unsigned int uid = pe.uid;
+    if (const ProcNode* node = rt->tree->find(pe.pid, pe.start_time)) {
+        exe = node->exe_str();
+        container_id = node->container_id_str();
+        uid = node->uid;
+    }
+    if (exe.empty())
+        exe.assign(pe.exe, strnlen(pe.exe, sizeof(pe.exe)));
+
+    detect::EventView view;
+    view.event_type = "process.exec";
+    view.pid  = pe.pid;
+    view.ppid = pe.ppid;
+    view.uid  = uid;
+    view.gid  = pe.gid;
+    view.comm = std::string_view(pe.comm, strnlen(pe.comm, sizeof(pe.comm)));
+    view.exe  = exe;
+    view.container_id = container_id;
+    const json anc = rt->enricher->ancestors_of(pe.pid, pe.ppid);
+    fill_ancestors_view(anc, view.ancestors);
+
+    detect::MatchResult m;
+    if (!engine->Evaluate(view, m))
+        return;
+
+    send_dsl_alert(*m.rule, m.output, view, exe, cached_user_name(uid),
+                   anc.empty() ? std::string() : anc.dump(), rt->alert_mgr);
+}
+
 // 路由单条事件：file→查进程树拼进程上下文后回原处理函数（告警富化 exe/
 // container_id/ancestors，树关闭时行为与现状一致；store 开启时渲染 JSON、
 // 富化祖先链并落库）、process→先更新进程树（exec 另落库）、
@@ -1201,6 +1412,7 @@ static void route_event(EventRecord& rec, TelemetryRuntime* rt) {
             actor_ptr = &actor;
         }
         process_event_core(&fe, rt->mctx, actor_ptr);
+        eval_rules_on_file_event(fe, actor_ptr, rt);
         if (rt->store_on) {
             // 读/写（file_permission）事件 event_type=0，按 mask 归一 action 便于检索
             if (fe.event_type == 0)
@@ -1218,12 +1430,15 @@ static void route_event(EventRecord& rec, TelemetryRuntime* rt) {
         struct proc_event pe;
         memcpy(&pe, rec.payload_raw, sizeof(pe));
         rt->tree->apply(pe);   // fork/exec/exit 维护进程树（单线程无锁）
-        if (pe.kind == PROC_KIND_EXEC && rt->store_on) {
-            json j;
-            render_process_exec_event(pe, rec, j);
-            rt->enricher->enrich(rec, j);
-            const std::string payload = j.dump();
-            rt->store->Append(rec, payload.c_str(), payload.size());
+        if (pe.kind == PROC_KIND_EXEC) {
+            eval_rules_on_exec_event(pe, rt);   // 规则引擎求值不依赖 store 开关
+            if (rt->store_on) {
+                json j;
+                render_process_exec_event(pe, rec, j);
+                rt->enricher->enrich(rec, j);
+                const std::string payload = j.dump();
+                rt->store->Append(rec, payload.c_str(), payload.size());
+            }
         }
         break;
     }
@@ -1312,9 +1527,9 @@ static void telemetry_consumer_main(TelemetryRuntime* rt) {
             last_stats = now;
         }
 
-        // 白名单抑制计数：每 60s 打增量（无增量不打）
+        // 白名单抑制计数 + 告警节流抑制累计：每 60s 打一行
         if (now - last_wl_stats >= 60000000000ULL) {
-            log_suppressed_stats();
+            log_suppressed_stats(rt->alert_mgr);
             last_wl_stats = now;
         }
 
@@ -1457,6 +1672,23 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
     proc_skel = process_monitor_start(&proc_rb, &bus);
     if (!proc_skel)
         spdlog::warn("[telemetry.process] proc_watch 启动失败，降级为无进程树富化");
+
+    // ── DSL 规则引擎启动加载（W4）：失败降级为空引擎，监控继续 ──
+    if (config.rule_engine.enabled) {
+        auto engine = build_rule_engine(config.rule_engine);
+        if (engine != nullptr) {
+            {
+                std::unique_lock<std::shared_mutex> lk(g_file_rules_mtx);
+                g_rule_engine = std::move(engine);
+            }
+            spdlog::info("[rule_engine] loaded {} DSL rules from {}",
+                         rule_engine_snapshot()->rule_count(), config.rule_engine.rules_dir);
+        } else {
+            spdlog::warn("[rule_engine] 启动加载失败，降级为空引擎（不产生 DSL 告警）");
+        }
+    } else {
+        spdlog::info("[rule_engine] disabled by config");
+    }
 
     TelemetryRuntime rt;
     rt.bus       = &bus;

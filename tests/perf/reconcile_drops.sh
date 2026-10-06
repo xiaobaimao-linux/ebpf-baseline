@@ -47,7 +47,7 @@ sleep 2   # 等 boot baseline check 产生的读事件落定（其不计入 befo
 
 echo "=== before 快照 ==="
 $SUDO ./baseline-guard stats --drop > "$RES/reconcile_before.txt"
-EV_BEFORE=$(sqlite3 events.db "select count(*) from events where json_extract(payload,'\$.file.path')='$TARGET';")
+EV_BEFORE=$(sqlite3 events_perf.db "select count(*) from events where json_extract(payload,'\$.file.path')='$TARGET';")
 
 echo "=== 压测: ops=$OPS secs=$SECS rate=$RATE ==="
 # PIN_CORE 环境变量：把 gen_load 钉到指定核（消除与消费线程的同核竞争，用于验收口径）
@@ -66,7 +66,7 @@ PREV_DROP=-1
 STABLE=0
 for i in $(seq 1 40); do
     sleep 2
-    EV_NOW=$(sqlite3 events.db "select count(*) from events where json_extract(payload,'\$.file.path')='$TARGET';")
+    EV_NOW=$(sqlite3 events_perf.db "select count(*) from events where json_extract(payload,'\$.file.path')='$TARGET';")
     $SUDO ./baseline-guard stats --drop > "$RES/reconcile_drain.txt"
     DROP_NOW=$(get_stat "$RES/reconcile_drain.txt" "bus.queue_full.hi.p0_file")
     if [ "$EV_NOW" -eq "$PREV_EV" ] && [ "$DROP_NOW" -eq "$PREV_DROP" ]; then
@@ -81,7 +81,7 @@ done
 
 echo "=== after 快照 ==="
 $SUDO ./baseline-guard stats --drop > "$RES/reconcile_after.txt"
-EV_AFTER=$(sqlite3 events.db "select count(*) from events where json_extract(payload,'\$.file.path')='$TARGET';")
+EV_AFTER=$(sqlite3 events_perf.db "select count(*) from events where json_extract(payload,'\$.file.path')='$TARGET';")
 
 echo "=== 停止 monitor ==="
 kill -TERM "$MPID" 2>/dev/null || $SUDO kill -TERM "$MPID"

@@ -33,11 +33,11 @@ echo "RSS@steady: $(grep VmRSS /proc/$MPID/status)"
 echo "=== 10,000 事件/s 零丢失验证（30s 窗口）=="
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo -n"; fi
 $SUDO ./baseline-guard stats --drop > "$RES/drop10k_before.txt"
-EV_BEFORE=$(sqlite3 events.db "select count(*) from events where json_extract(payload,'\$.file.path')='/tmp/bg-perf/tput_target.txt';")
+EV_BEFORE=$(sqlite3 events_perf.db "select count(*) from events where json_extract(payload,'\$.file.path')='/tmp/bg-perf/tput_target.txt';")
 echo "events_before=$EV_BEFORE"
 tests/perf/gen_load "$WORK/tput_target.txt" 300000 30 10000 | tee "$RES/tput10k.txt"
 sleep 3
-EV_AFTER=$(sqlite3 events.db "select count(*) from events where json_extract(payload,'\$.file.path')='/tmp/bg-perf/tput_target.txt';")
+EV_AFTER=$(sqlite3 events_perf.db "select count(*) from events where json_extract(payload,'\$.file.path')='/tmp/bg-perf/tput_target.txt';")
 $SUDO ./baseline-guard stats --drop > "$RES/drop10k_after.txt"
 echo "events_before=$EV_BEFORE events_after=$EV_AFTER received=$((EV_AFTER-EV_BEFORE))" | tee "$RES/tput10k_events.txt"
 

@@ -1,0 +1,32 @@
+# W4 D5 告警风暴压测配置：DSL 规则高频命中，验证冷却 + 抑制计数对账
+# FIM 规则 action=allow（仅让内核上报事件，本身不告警），告警全部来自 DSL 规则。
+telemetry:
+  network: false
+  dns: false
+  privilege: false
+  store: true
+  events_db: "events_perf.db"
+  batch_size: 500
+  batch_ms: 200
+
+rules:
+  - id: "STORM-SRC"
+    name: "storm-event-source"
+    severity: "low"
+    monitor:
+      path: "/tmp/bg-storm/storm_target.txt"
+      events: ["read"]
+      action: "allow"
+
+rule_engine:
+  enabled: true
+  rules_dir: "rules/storm"
+
+alert:
+  dingtalk:
+    webhook: ""
+    secret: ""
+  throttle: 60          # 60s 冷却窗口：5 分钟风暴预期 ~5 次翻窗发送
+
+db:
+  retention_days: 30

@@ -11,6 +11,12 @@ telemetry:
   batch_size: 500      # 一事务批量条数
   batch_ms: 200        # 批量 flush 间隔（毫秒）
 
+# ── DSL 规则引擎（rules/ 目录 *.yaml 全量加载，语法见 docs/rule-dsl-v1.md）──
+rule_engine:
+  enabled: true
+  rules_dir: "rules/examples"   # 加载器递归扫描子目录；生产默认只挂内置示例规则，
+                                # 压测规则目录（rules/perf-100、rules/storm）由各自压测配置单独指定
+
 # ── 纯 YAML 文件规则（read 事件走 file_open LSM 钩子）──
 rules:
   - id: "W2-FILE-001"

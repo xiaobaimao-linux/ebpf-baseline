@@ -1,0 +1,10 @@
+# 读 /etc/shadow：非白名单进程 open 读
+# 白名单为常见合法读取者（改密/PAM 校验/提权工具），按现场业务补充
+- rule: Read Etc Shadow By Unusual Process
+  desc: 非白名单进程读取 /etc/shadow，疑似凭据窃取
+  condition: event_type = file.read and file.path = /etc/shadow and not process.exe in (/usr/bin/passwd, /usr/sbin/sshd, /usr/bin/sudo, /usr/bin/chage, /usr/sbin/chage, /usr/sbin/unix_chkpwd, /usr/bin/su)
+  output: "敏感文件 /etc/shadow 被读取 (rule=%rule.name exe=%process.exe pid=%process.pid uid=%process.uid container=%container.container_id)"
+  priority: high
+  attack: [T1003, T1552]
+  fpr_note: 备份软件、配置管理 agent（ansible/puppet/salt）、安全巡检脚本会周期性读取；将对应 exe 加入 in 白名单列表即可收敛
+  response: 确认进程合法性；非预期进程则检查其启动链（process.ancestors）、是否伴随提权（priv.setuid）与外联（network.connect），必要时冻结该进程并取证

@@ -213,6 +213,24 @@ static void parseTelemetryNode(const YAML::Node &telemetryNode, TelemetryConfig 
     }
 }
 
+static void parseRuleEngineNode(const YAML::Node &node, RuleEngineConfig &rule_engine) {
+    if (node["enabled"]) {
+        try {
+            rule_engine.enabled = node["enabled"].as<bool>();
+            spdlog::info("规则引擎: {}", rule_engine.enabled ? "开启" : "关闭");
+        } catch (const YAML::Exception &e) {
+            spdlog::warn("无法解析 rule_engine.enabled 值: {}", e.what());
+        }
+    }
+    if (node["rules_dir"]) {
+        try {
+            rule_engine.rules_dir = node["rules_dir"].as<string>();
+        } catch (const YAML::Exception &e) {
+            spdlog::warn("无法解析 rule_engine.rules_dir 值: {}", e.what());
+        }
+    }
+}
+
 // 解析 YAML 文件，返回完整配置对象
 Config parseYamlFile(const string &filename) {
     Config config;
@@ -233,6 +251,11 @@ Config parseYamlFile(const string &filename) {
         // 解析 telemetry: 节点（遥测开关）
         if (root["telemetry"]) {
             parseTelemetryNode(root["telemetry"], config.telemetry);
+        }
+
+        // 解析 rule_engine: 节点（DSL 规则引擎）
+        if (root["rule_engine"]) {
+            parseRuleEngineNode(root["rule_engine"], config.rule_engine);
         }
 
         if (!root["rules"]) {
@@ -563,6 +586,9 @@ bool tryParseYamlFile(const string &filename, Config &out, string &err) {
     }
     if (root["telemetry"]) {
         parseTelemetryNode(root["telemetry"], out.telemetry);
+    }
+    if (root["rule_engine"]) {
+        parseRuleEngineNode(root["rule_engine"], out.rule_engine);
     }
 
     if (!root["rules"]) {

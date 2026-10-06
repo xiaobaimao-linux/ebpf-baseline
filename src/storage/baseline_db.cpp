@@ -21,6 +21,7 @@ struct AlertsColumns {
     bool exe = false;
     bool container_id = false;
     bool ancestors = false;
+    bool attack = false;
 };
 
 // PRAGMA table_info 探测 alerts 表已有列
@@ -39,6 +40,7 @@ AlertsColumns ProbeAlertsColumns(sqlite3* db) {
         else if (col == "exe")          cols.exe = true;
         else if (col == "container_id") cols.container_id = true;
         else if (col == "ancestors")    cols.ancestors = true;
+        else if (col == "attack")       cols.attack = true;
     }
     sqlite3_finalize(stmt);
     return cols;
@@ -53,7 +55,8 @@ std::string BuildAlertsSelect(const AlertsColumns& cols) {
     sql += "expected, actual, action_taken, dingtalk_sent, recorded_at, ";
     sql += cols.exe ? "exe, " : "'' AS exe, ";
     sql += cols.container_id ? "container_id, " : "'' AS container_id, ";
-    sql += cols.ancestors ? "ancestors" : "'' AS ancestors";
+    sql += cols.ancestors ? "ancestors, " : "'' AS ancestors, ";
+    sql += cols.attack ? "attack" : "'' AS attack";
     return sql;
 }
 
@@ -204,6 +207,8 @@ void BaselineDB::InitTable() {
         sqlite3_exec(db_, "ALTER TABLE alerts ADD COLUMN container_id TEXT;", nullptr, nullptr, nullptr);
     if (!alerts_cols.ancestors)
         sqlite3_exec(db_, "ALTER TABLE alerts ADD COLUMN ancestors TEXT;", nullptr, nullptr, nullptr);
+    if (!alerts_cols.attack)
+        sqlite3_exec(db_, "ALTER TABLE alerts ADD COLUMN attack TEXT;", nullptr, nullptr, nullptr);
 
     const char *copy_sql = R"SQL(
         INSERT OR IGNORE INTO baseline_entries
@@ -596,8 +601,8 @@ void BaselineDB::SaveAlert(const AlertRecord &record) {
             INSERT INTO alerts
             (rule_id, rule_name, severity, file_path, event_type,
              process_name, pid, user_name, uid, expected, actual, action_taken,
-             dingtalk_sent, recorded_at, exe, container_id, ancestors)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+             dingtalk_sent, recorded_at, exe, container_id, ancestors, attack)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         )";
 
     sqlite3_stmt *stmt = nullptr;
@@ -620,6 +625,7 @@ void BaselineDB::SaveAlert(const AlertRecord &record) {
     sqlite3_bind_text(stmt, 15, record.exe.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 16, record.container_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 17, record.ancestors.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 18, record.attack.c_str(), -1, SQLITE_STATIC);
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         spdlog::error("Save alert failed: {}", sqlite3_errmsg(db_));
@@ -779,6 +785,11 @@ static AlertRecord ReadAlertRecord(sqlite3_stmt* stmt) {
         const auto* anc = sqlite3_column_text(stmt, 16);
         if (anc != nullptr)
             r.ancestors = reinterpret_cast<const char*>(anc);
+    }
+    if (ncols > 17) {
+        const auto* atk = sqlite3_column_text(stmt, 17);
+        if (atk != nullptr)
+            r.attack = reinterpret_cast<const char*>(atk);
     }
     return r;
 }

@@ -203,6 +203,7 @@ void AlertManager::SaveAlertToDB(const AlertEvent& event, bool dingtalk_sent) {
     record.exe          = event.exe;
     record.container_id = event.container_id;
     record.ancestors    = event.ancestors;
+    record.attack       = event.attack;
     record.dingtalk_sent = dingtalk_sent;
     record.recorded_at  = event.timestamp.empty() ? NowString() : event.timestamp;
 
@@ -269,6 +270,7 @@ bool AlertManager::SendDingTalk(const AlertEvent& event) {
     // 1. 检查是否被节流：节流窗口内钉钉不发、库不存（首条已入库），
     //    消息体/JSON 构建纯属浪费，提前返回（外部可观察行为不变）
     if (IsThrottled(event.rule_id)) {
+        NoteThrottled(event.rule_id);
         spdlog::debug("Alert throttled for rule {}, skip DingTalk and DB persist",
                       event.rule_id);
         return false;

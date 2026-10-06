@@ -60,3 +60,8 @@ alert:
 
 db:
   retention_days: 30
+
+# W4 D3-D4：DSL 示例规则端到端验证（rules/examples/）
+rule_engine:
+  enabled: true
+  rules_dir: "rules/examples"

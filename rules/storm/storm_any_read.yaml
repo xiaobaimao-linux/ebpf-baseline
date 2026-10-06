@@ -1,0 +1,9 @@
+# 告警风暴压测专用规则（W4 D5 任务5）：任何对 storm 目标文件的读
+- rule: Storm Any File Read
+  desc: 告警风暴压测规则，故意高频命中
+  condition: event_type = file.read and file.path = /tmp/bg-storm/storm_target.txt
+  output: "storm hit (exe=%process.exe pid=%process.pid file=%file.path)"
+  priority: low
+  attack: [T1003]
+  fpr_note: 压测专用规则，正常环境不应加载
+  response: 压测专用规则，正常环境不应加载

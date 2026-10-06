@@ -38,7 +38,6 @@ alert:
 db:
   retention_days: 30
 
-# W4 D4：reconcile_drops.sh 走本配置，规则引擎开（100 条）验证高优零丢失
 rule_engine:
-  enabled: true
+  enabled: false
   rules_dir: "rules/perf-100"

@@ -21,7 +21,7 @@ INCLUDE_DIRS = -I. \
                -I./src/telemetry \
                -I./bpf
 
-CXXFLAGS = -std=c++17 -Wall -Wextra -g -MMD -MP $(INCLUDE_DIRS)
+CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g -MMD -MP $(INCLUDE_DIRS)
 # -Wno-missing-declarations：完整版 vmlinux.h 含未实例化的前向声明成员，
 # 会触发 -Wmissing-declarations（旧精简版 vmlinux.h 无此问题），非代码缺陷
 BPF_CFLAGS = -target bpf -D__TARGET_ARCH_x86 \
@@ -78,6 +78,9 @@ MAIN_SRCS = src/main.cpp \
             src/common/commonfun.cpp \
             src/common/utils.cpp \
             src/common/container.cpp \
+            src/detect/condition_parser.cpp \
+            src/detect/rule_loader.cpp \
+            src/detect/rule_engine.cpp \
             src/ops/stats.cpp \
             src/storage/baseline_db.cpp \
             src/storage/event_store.cpp

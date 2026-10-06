@@ -36,3 +36,6 @@ tests/test_event_bus
 /tests/test_utils
 /tests/test_watermark
 /tests/test_event_bus
+
+# 压测生成物（tests/perf/gen_rules_100.sh 按需生成）
+/rules/perf-100/

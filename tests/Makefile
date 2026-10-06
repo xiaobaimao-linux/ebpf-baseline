@@ -17,7 +17,7 @@ CONFIG_SRCS = $(SRC_DIR)/cli/config.cpp $(SRC_DIR)/common/utils.cpp
 all: unit integration
 
 # ====== 单元测试 ======
-unit: test_config test_utils test_watermark test_event_bus test_process_tree test_whitelist
+unit: test_config test_utils test_watermark test_event_bus test_process_tree test_whitelist test_rule_dsl
 	@echo "=== Running unit tests ==="
 	./test_config
 	./test_utils
@@ -25,6 +25,7 @@ unit: test_config test_utils test_watermark test_event_bus test_process_tree tes
 	./test_event_bus
 	./test_process_tree
 	./test_whitelist
+	./test_rule_dsl
 
 test_config: unit/test_config.cpp $(CONFIG_SRCS)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(CONFIG_SRCS) $(LDFLAGS_COMMON) $(LDFLAGS_SSL)
@@ -44,6 +45,11 @@ test_process_tree: unit/test_process_tree.cpp $(SRC_DIR)/telemetry/process_tree.
 test_whitelist: unit/test_whitelist.cpp $(SRC_DIR)/baseline/whitelist.cpp $(SRC_DIR)/common/container.cpp $(CONFIG_SRCS)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(SRC_DIR)/baseline/whitelist.cpp $(SRC_DIR)/common/container.cpp $(CONFIG_SRCS) $(LDFLAGS_COMMON) $(LDFLAGS_SSL)
 
+DETECT_SRCS = $(SRC_DIR)/detect/condition_parser.cpp $(SRC_DIR)/detect/rule_loader.cpp $(SRC_DIR)/detect/rule_engine.cpp
+
+test_rule_dsl: unit/test_rule_dsl.cpp $(DETECT_SRCS)
+	$(CXX) $(CXXFLAGS) -I$(SRC_DIR)/detect -o $@ $< $(DETECT_SRCS) $(LDFLAGS_COMMON)
+
 # ====== 集成测试 ======
 integration:
 	@echo "=== Running integration tests ==="
@@ -57,5 +63,5 @@ e2e:
 	bash e2e/test_workflow.sh
 
 clean:
-	rm -f test_config test_utils test_watermark test_event_bus
-	rm -rf /tmp/baseline_test_* /tmp/baseline_monitor_test_*
+	rm -f test_config test_utils test_watermark test_event_bus test_rule_dsl
+	rm -rf /tmp/baseline_test_* /tmp/baseline_monitor_test_* /tmp/baseline_rdsl_*
