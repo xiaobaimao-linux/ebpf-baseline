@@ -47,9 +47,13 @@ inline unsigned char category_priority(unsigned char category) {
 
 // ── 定长 POD 事件记录 ─────────────────────────────────────────────
 // 队列槽即此结构，禁止在 rb 回调内 malloc / 阻塞 / /proc IO。
-// payload_json 在【路由前】承载各 BPF 原始事件结构（struct event /
-// net_event / priv_event / proc_event）的字节拷贝，供消费线程还原；
-// 落库前会被渲染后的 JSON（含 process.ancestors 富化）覆盖。
+// payload_raw 只承载各 BPF 原始事件结构（struct event / net_event /
+// priv_event / proc_event）的字节拷贝，供消费线程还原；容量取最大原始
+// 结构（priv_event mount 变体 ≈600B）向上取整。渲染后的 JSON 不再写回
+// 槽位（R13：2048B→640B，hi+lo 队列常驻内存 224MB→67MB），由消费线程
+// 以独立字符串随 Append() 传给 EventStore。
+inline constexpr size_t kRecordPayloadCap = 640;
+
 struct EventRecord {
     unsigned long long ts_ns;          // 事件时间（内核 bpf_ktime_get_ns，CLOCK_MONOTONIC 域）
     unsigned long long enqueue_ts_ns;  // 入队时间（用户态 CLOCK_MONOTONIC，排队延迟基准）
@@ -64,7 +68,7 @@ struct EventRecord {
     char               comm[16];       // 不保证 NUL 结尾，消费侧以长度为界
     char               exe[256];       // 尽力填充，不保证 NUL 结尾
     char               container_id[13]; // 12 位短 ID + NUL；无容器为空串
-    char               payload_json[2048]; // 路由前=原始事件字节；落库前=渲染 JSON（含转义）
+    char               payload_raw[kRecordPayloadCap]; // 原始事件字节（slot 常驻载体）
 };
 
 // 字符串字段以定长数组承载时的安全拷贝：保证 NUL 结尾

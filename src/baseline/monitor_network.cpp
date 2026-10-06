@@ -159,8 +159,9 @@ int handle_network_event(void *ctx, void *data, size_t data_sz)
     rec.category = (evt.event_kind == NET_EVENT_DNS) ? CAT_DNS : CAT_NETWORK;
     rec.priority = (evt.event_kind == NET_EVENT_DNS) ? PRIO_DNS : PRIO_NETWORK;
     rec.action   = evt.event_kind;
-    // 原始事件字节留给消费线程渲染（内部路由用，落库前会被渲染 JSON 覆盖）
-    memcpy(rec.payload_json, &evt, sizeof(evt));
+    // 原始事件字节留给消费线程渲染（内部路由用；渲染 JSON 随 Append 直传，不写回槽位）
+    static_assert(sizeof(evt) <= sizeof(rec.payload_raw), "net_event 超出 payload_raw 容量");
+    memcpy(rec.payload_raw, &evt, sizeof(evt));
 
     bus->try_push(rec);
     return 0;

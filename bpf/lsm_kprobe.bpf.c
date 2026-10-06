@@ -23,20 +23,24 @@ int BPF_KPROBE(kprobe_file_permission, struct file *file, int mask)
 
     unsigned long ino = BPF_CORE_READ(file, f_inode, i_ino);
 
-    struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
-    if (!rule)
+    /* R13：规则集合匹配；顺带修正内核 MAY_* 位编码（MAY_READ=4/MAY_WRITE=2，
+     * 原码误用 EVENT_READ(1) 判定导致 read 永不命中），并归一化 mask 与 LSM
+     * 路径一致 */
+    struct monitor_rule_set *set = bpf_map_lookup_elem(&monitor_actions, &ino);
+    struct rule_match_result m = match_rule_set(set, mask & 4, mask & 2, 0);
+    if (!m.matched)
         return 0;
 
-    if (!((rule->events_mask & EVENT_READ) && (mask & EVENT_READ)) &&
-        !((rule->events_mask & EVENT_WRITE) && (mask & EVENT_WRITE)))
-        return 0;
+    int norm_mask = 0;
+    if (mask & 4) norm_mask |= EVENT_READ;
+    if (mask & 2) norm_mask |= EVENT_WRITE;
 
     /* kprobe 无法阻止操作，ACTION_BLOCK 降级为 ACTION_ALERT */
-    unsigned char effective_action = rule->action;
+    unsigned char effective_action = m.action;
     if (effective_action == ACTION_BLOCK)
         effective_action = ACTION_ALERT;
 
-    emit_attr_event(ctx, ino, dentry, 0, mask, 0, 0, 0, effective_action, BACKPRESSURE_REALTIME);
+    emit_attr_event(ctx, ino, dentry, 0, norm_mask, 0, 0, 0, effective_action, BACKPRESSURE_REALTIME);
     return 0;
 }
 
@@ -48,10 +52,11 @@ int BPF_KPROBE(kprobe_path_chmod, const struct path *path, umode_t mode)
     if (!dentry) return 0;
 
     unsigned long ino = BPF_CORE_READ(dentry, d_inode, i_ino);
-    struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
-    if (!rule || !(rule->events_mask & EVENT_MASK_BIT(EVENT_CHMOD))) return 0;
+    struct monitor_rule_set *set = bpf_map_lookup_elem(&monitor_actions, &ino);
+    struct rule_match_result m = match_rule_set(set, 0, 0, EVENT_MASK_BIT(EVENT_CHMOD));
+    if (!m.matched) return 0;
 
-    unsigned char effective_action = rule->action;
+    unsigned char effective_action = m.action;
     if (effective_action == ACTION_BLOCK)
         effective_action = ACTION_ALERT;
 
@@ -67,10 +72,11 @@ int BPF_KPROBE(kprobe_path_chown, const struct path *path, unsigned int uid, uns
     if (!dentry) return 0;
 
     unsigned long ino = BPF_CORE_READ(dentry, d_inode, i_ino);
-    struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
-    if (!rule || !(rule->events_mask & EVENT_MASK_BIT(EVENT_CHOWN))) return 0;
+    struct monitor_rule_set *set = bpf_map_lookup_elem(&monitor_actions, &ino);
+    struct rule_match_result m = match_rule_set(set, 0, 0, EVENT_MASK_BIT(EVENT_CHOWN));
+    if (!m.matched) return 0;
 
-    unsigned char effective_action = rule->action;
+    unsigned char effective_action = m.action;
     if (effective_action == ACTION_BLOCK)
         effective_action = ACTION_ALERT;
 
@@ -85,10 +91,11 @@ int BPF_KPROBE(kprobe_inode_unlink, struct inode *dir, struct dentry *dentry)
     if (!dentry) return 0;
 
     unsigned long ino = BPF_CORE_READ(dentry, d_inode, i_ino);
-    struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
-    if (!rule || !(rule->events_mask & EVENT_MASK_BIT(EVENT_UNLINK))) return 0;
+    struct monitor_rule_set *set = bpf_map_lookup_elem(&monitor_actions, &ino);
+    struct rule_match_result m = match_rule_set(set, 0, 0, EVENT_MASK_BIT(EVENT_UNLINK));
+    if (!m.matched) return 0;
 
-    unsigned char effective_action = rule->action;
+    unsigned char effective_action = m.action;
     if (effective_action == ACTION_BLOCK)
         effective_action = ACTION_ALERT;
 
@@ -104,9 +111,10 @@ int BPF_KPROBE(kprobe_inode_rename,
 {
     if (old_dentry) {
         unsigned long ino = BPF_CORE_READ(old_dentry, d_inode, i_ino);
-        struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
-        if (rule && (rule->events_mask & EVENT_WRITE)) {
-            unsigned char effective_action = rule->action;
+        struct monitor_rule_set *set = bpf_map_lookup_elem(&monitor_actions, &ino);
+        struct rule_match_result m = match_rule_set(set, 0, 1, 0);
+        if (m.matched) {
+            unsigned char effective_action = m.action;
             if (effective_action == ACTION_BLOCK)
                 effective_action = ACTION_ALERT;
             emit_attr_event(ctx, ino, old_dentry, EVENT_RENAME, 0, 0, 0, 0,
@@ -116,9 +124,10 @@ int BPF_KPROBE(kprobe_inode_rename,
 
     if (new_dentry) {
         unsigned long ino = BPF_CORE_READ(new_dentry, d_inode, i_ino);
-        struct monitor_rule *rule = bpf_map_lookup_elem(&monitor_actions, &ino);
-        if (rule && (rule->events_mask & EVENT_WRITE)) {
-            unsigned char effective_action = rule->action;
+        struct monitor_rule_set *set = bpf_map_lookup_elem(&monitor_actions, &ino);
+        struct rule_match_result m = match_rule_set(set, 0, 1, 0);
+        if (m.matched) {
+            unsigned char effective_action = m.action;
             if (effective_action == ACTION_BLOCK)
                 effective_action = ACTION_ALERT;
             emit_attr_event(ctx, ino, new_dentry, EVENT_RENAME, 0, 0, 0, 0,

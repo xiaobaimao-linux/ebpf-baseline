@@ -21,7 +21,7 @@ static EventRecord make_rec(unsigned char category, unsigned char priority,
     rec.category = category;
     rec.priority = priority;
     rec.action = 1;
-    std::memset(rec.payload_json, 0xAB, sizeof(rec.payload_json));
+    std::memset(rec.payload_raw, 0xAB, sizeof(rec.payload_raw));
     return rec;
 }
 

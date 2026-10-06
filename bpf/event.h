@@ -43,6 +43,18 @@ struct monitor_rule {
     unsigned char severity;     // 严重等级：SEVERITY_LOW(0) ~ SEVERITY_CRITICAL(3)
 };
 
+// 同一 inode 可合并的最大规则数（R13 缺陷修复：同文件多规则）
+#define MAX_RULES_PER_INO 4
+
+// monitor_actions map 的 value：同一 inode 的规则集合（count=有效条数）。
+// 同文件配置多条规则时由用户态合并为一条 map 记录写入（原先逐条 BPF_ANY
+// 更新同 key，后写覆盖先写）；eBPF 逐条匹配，取最强 action / 最高 severity。
+// sizeof = 13B，对 map 内存与查找热路径影响可忽略。
+struct monitor_rule_set {
+    unsigned char count;
+    struct monitor_rule rules[MAX_RULES_PER_INO];
+};
+
 struct event {
     unsigned int pid;
     char comm[16];

@@ -266,7 +266,8 @@ int handle_privilege_event(void *ctx, void *data, size_t data_sz)
     rec.priority = PRIO_CTRL;
     rec.action   = evt.priv_kind;
     // 原始事件字节留给消费线程渲染
-    memcpy(rec.payload_json, &evt, sizeof(evt));
+    static_assert(sizeof(evt) <= sizeof(rec.payload_raw), "priv_event 超出 payload_raw 容量");
+    memcpy(rec.payload_raw, &evt, sizeof(evt));
 
     bus->try_push(rec);
     return 0;

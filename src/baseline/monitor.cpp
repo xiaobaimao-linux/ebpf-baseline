@@ -24,6 +24,7 @@
 #include <bpf/libbpf.h>
 #include <cerrno>
 #include <csignal>
+#include <malloc.h>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -128,10 +129,12 @@ static std::string ResolveUserInfoByPid(int pid, std::string& uid) {
 // ── 规则表快照与热加载（M0-2）────────────────────────────────────
 // FileRuleTable 为整代不可变快照：SIGHUP 热加载在写锁内整体替换；
 // 事件处理（消费线程 / perf 主循环）持读锁访问，锁内 Rule 引用恒有效。
+// R13：inode_to_rules 一对多——同一文件配置多条规则时各自独立告警
+//（原先 unordered_map<ino, Rule> 后写覆盖先写，仅最后一条生效）。
 struct FileRuleTable {
-    std::unordered_map<unsigned long, Rule> inode_to_rule;
+    std::unordered_map<unsigned long, std::vector<Rule>> inode_to_rules;
     std::unordered_map<unsigned long, std::string> inode_to_path;
-    std::unordered_map<unsigned long, std::string> inode_to_hash;
+    std::unordered_map<unsigned long, std::vector<std::string>> inode_to_hashes;
 
     static std::shared_ptr<FileRuleTable> Build(const Config& config) {
         auto t = std::make_shared<FileRuleTable>();
@@ -142,10 +145,10 @@ struct FileRuleTable {
                 continue;
             if (rule.ino == 0)
                 continue;
-            t->inode_to_rule[rule.ino] = rule;
+            t->inode_to_rules[rule.ino].push_back(rule);
             t->inode_to_path[rule.ino] = rule.monitor_path;
             if (!rule.check_hash.empty())
-                t->inode_to_hash[rule.ino] = rule.check_hash;
+                t->inode_to_hashes[rule.ino].push_back(rule.check_hash);
         }
         return t;
     }
@@ -483,7 +486,8 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     rec.category = CAT_FILE;
     rec.priority = PRIO_FILE;
     rec.action   = e->event_type;
-    memcpy(rec.payload_json, e, sizeof(*e));  // struct event 原始字节，供消费线程还原
+    static_assert(sizeof(*e) <= sizeof(rec.payload_raw), "struct event 超出 payload_raw 容量");
+    memcpy(rec.payload_raw, e, sizeof(*e));  // struct event 原始字节，供消费线程还原
 
     bus->try_push(rec);
     return 0;
@@ -535,17 +539,16 @@ static void process_event_core(struct event* e, MonitorContext* mctx,
         }
     }
 
-    // ── 原有 YAML 规则匹配逻辑（不变；M0-2 加白名单抑制决策点）──────
+    // ── 原有 YAML 规则匹配逻辑（R13：同 inode 多规则逐条独立告警；M0-2 加白名单抑制决策点）
     // 持读锁保证热加载（写锁整体替换快照）期间 Rule/路径引用恒有效
     {
     std::shared_lock<std::shared_mutex> rules_lock(g_file_rules_mtx);
     const auto file_rules = g_file_rules;
-    auto it_rule = file_rules->inode_to_rule.find(e->ino);
-    if (it_rule != file_rules->inode_to_rule.end()) {
-        const Rule &rule = it_rule->second;
-
+    auto it_rules = file_rules->inode_to_rules.find(e->ino);
+    if (it_rules != file_rules->inode_to_rules.end()) {
         auto it_path = file_rules->inode_to_path.find(e->ino);
 
+        for (const Rule& rule : it_rules->second) {
         // 白名单抑制（M0-2）：命中则计数 + debug 留痕（rule/pid/exe/path），
         // 跳过本规则全部告警；未命中及 fail-closed 场景走原有告警流程，行为零变化。
         // exe/祖先优先用进程树 exec 时捕获的 actor（短寿进程 /proc 已回收，树数据
@@ -571,7 +574,7 @@ static void process_event_core(struct event* e, MonitorContext* mctx,
                               rule.id, e->pid, exe,
                               it_path != file_rules->inode_to_path.end() ? it_path->second
                                                                          : std::string("?"));
-                return;
+                continue;
             }
         }
 
@@ -588,10 +591,10 @@ static void process_event_core(struct event* e, MonitorContext* mctx,
                 on_check_mismatch_detected(rule, path, e->comm, e->pid, *alert_mgr, actor);
             }
         }
+        }  // for rule
 
-        auto it_hash = file_rules->inode_to_hash.find(e->ino);
-        if (it_hash != file_rules->inode_to_hash.end()) {
-            const std::string &expected_hash = it_hash->second;
+        auto it_hash = file_rules->inode_to_hashes.find(e->ino);
+        if (it_hash != file_rules->inode_to_hashes.end() && !it_hash->second.empty()) {
             // 文件可能在读取瞬间被删除（如 unlink 事件后），compute_sha256
             // 抛异常时跳过本次哈希检查，避免异常穿透终止 monitor
             std::string current_hash;
@@ -599,10 +602,11 @@ static void process_event_core(struct event* e, MonitorContext* mctx,
                 current_hash = compute_sha256(it_path->second);
             } catch (const std::exception &ex) {
                 spdlog::debug("hash check skipped for {}: {}", it_path->second, ex.what());
-                current_hash = expected_hash;  // 视为一致，不告警
+                current_hash.clear();  // 视为一致，不告警
             }
 
-            if (current_hash != expected_hash) {
+            for (const std::string &expected_hash : it_hash->second) {
+            if (!current_hash.empty() && current_hash != expected_hash) {
                 std::ostringstream oss;
                 oss << "[" << actionToString(static_cast<Action>(e->action)) << "] File modified! hash mismatch\n"
                     << "  path: " << it_path->second << "\n"
@@ -611,6 +615,7 @@ static void process_event_core(struct event* e, MonitorContext* mctx,
                     << "  expected_hash: " << expected_hash << "\n"
                     << "  current_hash:  " << current_hash << std::endl;
                 spdlog::warn(oss.str());
+            }
             }
         } else {
             // 无哈希基线的访问提示与 VIOLATION 行重复（同事件已告警），
@@ -708,14 +713,16 @@ static int common_monitor_init(int fd_actions,
                                bool skip_boot_check,
                                AlertManager& alert_mgr,
                                BaselineDB*& baseline_db_out) {
-    // 写入 monitor_actions：同时传递动作、事件掩码和严重等级
+    // 写入 monitor_actions：同 inode 的多条规则合并为一个 monitor_rule_set
+    // 一次写入（R13 缺陷修复：原先逐条 BPF_ANY 更新同 key，后写覆盖先写）。
+    // 超过 MAX_RULES_PER_INO 时保留 action/severity 最强者并 warn 留痕。
+    std::unordered_map<unsigned long, monitor_rule_set> rule_sets;
     for (const auto &rule : config.rules) {
         if (!rule.has_monitor)
             continue;
         if (rule.monitor_path.empty() || rule.ino == 0)
             continue;
 
-        unsigned long key = rule.ino;
         struct monitor_rule value{};
         value.action = (rule.monitor_action == Action::BLOCK) ? ACTION_BLOCK : ACTION_ALERT;
         value.events_mask = 0;
@@ -731,7 +738,26 @@ static int common_monitor_init(int fd_actions,
             value.events_mask |= EVENT_MASK_BIT(EVENT_CHOWN);
         value.severity = rule.severity;
 
-        bpf_map_update_elem(fd_actions, &key, &value, BPF_ANY);
+        auto &set = rule_sets[rule.ino];
+        if (set.count < MAX_RULES_PER_INO) {
+            set.rules[set.count++] = value;
+        } else {
+            // 已满：仅当新规则严格强于最弱条目时替换之
+            int weakest = 0;
+            for (int i = 1; i < MAX_RULES_PER_INO; i++) {
+                if (set.rules[i].action < set.rules[weakest].action ||
+                    (set.rules[i].action == set.rules[weakest].action &&
+                     set.rules[i].severity < set.rules[weakest].severity))
+                    weakest = i;
+            }
+            if (value.action > set.rules[weakest].action ||
+                (value.action == set.rules[weakest].action &&
+                 value.severity > set.rules[weakest].severity)) {
+                set.rules[weakest] = value;
+            }
+            spdlog::warn("[rules] inode {} 规则数超过 {}，已保留最强的 {} 条（rule {} 被合并丢弃）",
+                         rule.ino, MAX_RULES_PER_INO, MAX_RULES_PER_INO, rule.id);
+        }
     }
 
     // 安装规则表 + 白名单快照（启动代；SIGHUP 热加载时整代替换）
@@ -761,18 +787,20 @@ static int common_monitor_init(int fd_actions,
 
             int baseline_registered = 0;
             for (const auto& [ino, entry] : g_inode_to_baseline) {
-                if (g_file_rules->inode_to_rule.find(ino) == g_file_rules->inode_to_rule.end()) {
-                    struct monitor_rule value{};
-                    value.action = ACTION_ALERT;
-                    // 基线完整性关注内容读写 + 权限/属主变更（perm_changed 风险类型）
-                    value.events_mask = EVENT_READ | EVENT_WRITE |
-                                        EVENT_MASK_BIT(EVENT_CHMOD) |
-                                        EVENT_MASK_BIT(EVENT_CHOWN);
-                    value.severity = SEVERITY_HIGH;
-                    if (bpf_map_update_elem(fd_actions, &ino, &value, BPF_NOEXIST) == 0) {
-                        ++baseline_registered;
-                    }
-                }
+                // 语义保持：YAML 规则已覆盖的 inode 不再注册基线伪规则
+                //（原 BPF_NOEXIST + 显式跳过的行为）
+                if (rule_sets.find(ino) != rule_sets.end())
+                    continue;
+                auto &set = rule_sets[ino];
+                struct monitor_rule value{};
+                value.action = ACTION_ALERT;
+                // 基线完整性关注内容读写 + 权限/属主变更（perm_changed 风险类型）
+                value.events_mask = EVENT_READ | EVENT_WRITE |
+                                    EVENT_MASK_BIT(EVENT_CHMOD) |
+                                    EVENT_MASK_BIT(EVENT_CHOWN);
+                value.severity = SEVERITY_HIGH;
+                set.rules[set.count++] = value;
+                ++baseline_registered;
             }
             spdlog::info("[baseline_monitor] registered {} baseline inodes to eBPF map",
                          baseline_registered);
@@ -799,6 +827,14 @@ static int common_monitor_init(int fd_actions,
             g_inode_to_baseline.clear();
         }
     }
+
+    // 统一下刷：每个 inode 一条 rule_set 记录（含 YAML 规则与基线伪规则）
+    int rules_written = 0;
+    for (auto &[ino, set] : rule_sets) {
+        if (bpf_map_update_elem(fd_actions, &ino, &set, BPF_ANY) == 0)
+            ++rules_written;
+    }
+    spdlog::info("[rules] monitor_actions: {} inodes written", rules_written);
     return 0;
 }
 
@@ -1155,7 +1191,7 @@ static void route_event(EventRecord& rec, TelemetryRuntime* rt) {
     switch (rec.category) {
     case CAT_FILE: {
         struct event fe;
-        memcpy(&fe, rec.payload_json, sizeof(fe));
+        memcpy(&fe, rec.payload_raw, sizeof(fe));
         // 进程树开启时按 (pid, start_time) 查树拼进程上下文再处理（告警富化）；
         // 树关闭（proc_watch 启动失败/旧内核路径）传 nullptr，行为与现状一致。
         FileActorContext actor;
@@ -1171,58 +1207,51 @@ static void route_event(EventRecord& rec, TelemetryRuntime* rt) {
                 rec.action = (fe.mask & EVENT_WRITE) ? EVENT_WRITE : EVENT_READ;
             // R10：payload 直写 JSON（与 nlohmann dump 逐字节一致），
             // 祖先链用 build_file_actor 预序列化串；actor 为空退回 Enricher 兜底
+            // R13：渲染 JSON 不再写回槽位，随 Append() 直接传给 EventStore
             thread_local std::string payload;   // 仅消费线程，复用缓冲
             render_file_payload(fe, rec, actor_ptr, rt->enricher, payload);
-            record_set_str(rec.payload_json, sizeof(rec.payload_json),
-                           payload.c_str(), payload.size());
-            rt->store->Append(rec);
+            rt->store->Append(rec, payload.c_str(), payload.size());
         }
         break;
     }
     case CAT_PROCESS: {
         struct proc_event pe;
-        memcpy(&pe, rec.payload_json, sizeof(pe));
+        memcpy(&pe, rec.payload_raw, sizeof(pe));
         rt->tree->apply(pe);   // fork/exec/exit 维护进程树（单线程无锁）
         if (pe.kind == PROC_KIND_EXEC && rt->store_on) {
             json j;
             render_process_exec_event(pe, rec, j);
             rt->enricher->enrich(rec, j);
             const std::string payload = j.dump();
-            record_set_str(rec.payload_json, sizeof(rec.payload_json),
-                           payload.c_str(), payload.size());
-            rt->store->Append(rec);
+            rt->store->Append(rec, payload.c_str(), payload.size());
         }
         break;
     }
     case CAT_NETWORK:
     case CAT_DNS: {
         struct net_event ne;
-        memcpy(&ne, rec.payload_json, sizeof(ne));
+        memcpy(&ne, rec.payload_raw, sizeof(ne));
         json j;
         render_network_event(ne, rec, j);
         spdlog::info("{}", j.dump());   // 与迁移前逐字节一致
         if (rt->store_on) {
             rt->enricher->enrich(rec, j);
             const std::string payload = j.dump();
-            record_set_str(rec.payload_json, sizeof(rec.payload_json),
-                           payload.c_str(), payload.size());
-            rt->store->Append(rec);
+            rt->store->Append(rec, payload.c_str(), payload.size());
         }
         break;
     }
     case CAT_PRIV:
     case CAT_NS: {
         struct priv_event pe;
-        memcpy(&pe, rec.payload_json, sizeof(pe));
+        memcpy(&pe, rec.payload_raw, sizeof(pe));
         json j;
         render_privilege_event(pe, rec, j);
         spdlog::info("{}", j.dump());   // 与迁移前逐字节一致
         if (rt->store_on) {
             rt->enricher->enrich(rec, j);
             const std::string payload = j.dump();
-            record_set_str(rec.payload_json, sizeof(rec.payload_json),
-                           payload.c_str(), payload.size());
-            rt->store->Append(rec);
+            rt->store->Append(rec, payload.c_str(), payload.size());
         }
         break;
     }
@@ -1244,6 +1273,9 @@ static void telemetry_consumer_main(TelemetryRuntime* rt) {
     unsigned long long last_retention = now_monotonic_ns();
     unsigned long long last_wl_stats  = now_monotonic_ns();
     unsigned long long last_drop_total = rt->bus->drop_count_total();
+    // R13：空闲自适应退避——连续空转时 200us→2ms 指数退避，有事件即复位。
+    // 压测下循环从不空转，吞吐路径零影响；空闲唤醒 5000/s→~500/s（CPU 优化）。
+    long idle_backoff_ns = 200000;
 
     while (*rt->running) {
         bool did_work = false;
@@ -1256,6 +1288,8 @@ static void telemetry_consumer_main(TelemetryRuntime* rt) {
             route_event(rec, rt);
             did_work = true;
         }
+        if (did_work)
+            idle_backoff_ns = 200000;
 
         if (rt->store)
             rt->store->FlushIfDue();
@@ -1302,9 +1336,11 @@ static void telemetry_consumer_main(TelemetryRuntime* rt) {
         // 用户态计数器的周期同步在主循环做（本线程内层 pop 循环在高压下
         // 不退出，周期任务会被饿死）；此处只保留退出后的最终同步。
 
-        // tombstone sweep：每 60s
+        // tombstone sweep：每 60s；顺带 malloc_trim 归还压测峰值后
+        // glibc arena 持有的空闲堆页（R13 内存收敛，best effort）
         if (now - last_sweep >= 60000000000ULL) {
             rt->tree->sweep_tombstones();
+            malloc_trim(0);
             last_sweep = now;
         }
 
@@ -1316,8 +1352,10 @@ static void telemetry_consumer_main(TelemetryRuntime* rt) {
         }
 
         if (!did_work) {
-            struct timespec ts {0, 200000};   // 空闲时 200us 退避
+            struct timespec ts {0, idle_backoff_ns};   // 空闲退避（自适应 200us~2ms）
             nanosleep(&ts, nullptr);
+            if (idle_backoff_ns < 2000000)
+                idle_backoff_ns *= 2;
         }
     }
 

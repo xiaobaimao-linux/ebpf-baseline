@@ -273,7 +273,7 @@ void EventStore::Prepare() {
     }
 }
 
-void EventStore::Append(const EventRecord& rec) {
+void EventStore::Append(const EventRecord& rec, const char* payload, size_t payload_len) {
     if (!db_ || !insert_stmt_)
         return;
 
@@ -289,7 +289,7 @@ void EventStore::Append(const EventRecord& rec) {
     row.uid = rec.uid;
     row.exe.assign(rec.exe, strnlen(rec.exe, sizeof(rec.exe)));
     row.container_id.assign(rec.container_id, strnlen(rec.container_id, sizeof(rec.container_id)));
-    row.payload.assign(rec.payload_json, strnlen(rec.payload_json, sizeof(rec.payload_json)));
+    row.payload.assign(payload, payload_len);
 
     pending_.push_back(std::move(row));
 
@@ -310,6 +310,9 @@ void EventStore::Flush() {
 
     WriteBatch();
     pending_.clear();
+    // 容量随历史峰值驻留：远超稳态批量时归还（R13 内存收敛）
+    if (pending_.capacity() > static_cast<size_t>(batch_size_) * 4)
+        std::vector<PendingRow>().swap(pending_);
     last_flush_ms_ = now_ms();
 }
 

@@ -152,3 +152,154 @@ reserve_failed 1,114（0.037%）→ 0。
   discarded 与用户态 bus/store 系列全部保留。
 
 **残余风险 1 至此关闭**：10k/s × 5min 内核侧零丢失达成。
+
+## R13（W4 D2）：四指标收口——内存 / CPU / 延迟归因 / 多规则缺陷
+
+日期：2026-10-06。对应 W4 D2 任务 1~4。测量机：8 核，kernel 7.0.0-30，
+`sudo ./baseline-guard monitor --db baseline.db -c {config.yaml|tests/perf/config.yaml}`。
+注意：本机空闲环境噪声高于 W3 测量时（同口径复测 W3 CPU 基线 3.48% → 本机
+4.60%），本节所有"前 → 后"均为同机同口径对比。
+
+### R13-1 内存：EventRecord 槽位瘦身 252MB → ~125MB ✓
+
+**归因**（smaps_rollup + 映射聚合）：RSS 大头是 EventBus 队列槽位预分配——
+定长 POD `EventRecord` 2,376B/槽（其中 `payload_json[2048]` 占 86%），
+hi 32,768 槽 + lo 65,536 槽 ≈ **224MB**，基本解释了 252MB 的全部。进程树
+（本机进程量级 <<10 万上限，实测个位数 MB）、SQLite（默认 cache_size 2MB×3
+连接 ≈6MB）、批缓冲（~1MB）均非大头，未动。
+
+**关键事实**：slot 内 payload 在路由前只承载 BPF 原始事件字节（最大结构
+`priv_event` mount 变体 608B）；渲染 JSON 是消费线程 pop 出本地副本后才生成
+的，**队列槽从不需要 2KB**。改动：
+
+| 措施 | 文件:行 | 效果 |
+|---|---|---|
+| `payload_json[2048]` → `payload_raw[640]`（≥最大原始事件结构，4 处 static_assert 守护）；渲染 JSON 改由 `EventStore::Append(rec, payload, len)` 直传，不再写回槽位 | `src/telemetry/event_record.hpp:48-80`、`src/storage/event_store.{hpp,cpp}`、`src/baseline/monitor*.cpp` | sizeof(EventRecord) 2,376→**968B**；hi+lo 队列常驻 224MB→**92MB** |
+| 消费线程 60s tick 加 `malloc_trim(0)`，归还压测峰值后 glibc arena 空闲页 | `src/baseline/monitor.cpp`（tombstone sweep 同 tick） | 压测后 RSS 不滞留峰值 |
+| `EventStore::pending_` Flush 后容量 >4×batch 时 swap 收缩 | `src/storage/event_store.cpp` Flush | 峰值批缓冲不常驻 |
+
+**数据**（VmRSS，30s 稳态 / 30s 10k/s 压测后）：
+
+| 口径 | 前 | 后 |
+|---|---|---|
+| VmRSS 稳态 | 258,624 kB | **123,516 kB** |
+| VmRSS 压测后 | 261,584 kB | **126,400 kB** |
+
+改后分布（smaps 聚合）：anon（≈EventBus 槽位）91.2MB、bpf-map（内核 ringbuf
+mmap）12.0MB、二进制+共享库 ~11MB、heap 1.8MB，其余零散；Pss 108MB。
+**验收：≤150MB 达标（余量 ~25MB），无折中申报。**
+
+### R13-2 CPU：消费线程空闲自适应退避 4.60% → 1.15% ✓
+
+**口径**：遥测全开（config.yaml）、无负载，pidstat 5s×60 均值（同 W3）。
+perf record 60s 空闲采样 Top2 均指向消费线程 200µs 空转退避循环：
+`finish_task_switch←do_nanosleep←telemetry_consumer_main` 26.5%、
+`clock_gettime←telemetry_consumer_main` 8.8%（每空转轮 2 次 try_pop +
+1 次 clock_gettime + 1 次 nanosleep，~5,000 轮/s）。
+
+**措施**（仅 1 处即达标，未做第 2/3 处）：空闲退避 200µs 固定 → 指数自适应
+200µs→2ms（连续空转每轮 ×2，有事件即复位）。压测下循环从不空转，吞吐路径
+零影响；代价是空闲/轻载时事件出队最多多等 ~2ms（batch_ms=200ms 落库口径下
+可忽略）。`src/baseline/monitor.cpp` telemetry_consumer_main。
+
+**数据**（pidstat 5s×60 均值，%CPU 单核）：
+
+| 口径 | user | sys | 合计 |
+|---|---|---|---|
+| 前 | 1.83 | 2.77 | **4.60** |
+| 后 | 0.60 | 0.54 | **1.15** |
+
+**验收：≤3% 达标**（对 W3 记录的 3.48% 基线亦成立：本机改前复测即 4.60%，
+改后 1.15%，降幅 3.45 个百分点）。
+
+### R13-3 延迟归因：P99 +34.6μs = 调试代码（已修）+ 实时 wakeup 固有尾（降级记录）
+
+**方法**：①LAT_LEVEL 分级对比（0=空探针 / 1=+map 查询 / 2=+emit 无调试 /
+3=当前完整，各级强制重编 + 5 轮 bench_lat 取中位）；②探针内 bpf_ktime 分段
+计时（L4=L2+计时、L5=L3+计时，per-CPU map 累加，bpftool dump 汇总）——
+本机 syscall 级噪声 ±30μs，分级差值被淹没，归因以探针内计时为准。
+
+**探针内分段测量**（每次 file_permission 调用，ns；30,100 次命中样本）：
+
+| 阶段 | L4（无调试） | L5（含调试） | 说明 |
+|---|---|---|---|
+| 未命中路径 pre（全系统每次文件操作都付） | 129~162 | 216 | dentry/ino CORE 读 + map 查询 |
+| 命中路径 pre | 125~147 | 1,032 | L5 多出 fname 256B 预读 + 1 次 trace_printk |
+| emit 合计 | 3,489 | 6,060 | 背压 + reserve + 填充 + submit |
+| emit 内：reserve+memset 328B | 74 | — | |
+| emit 内：字段填充 + comm + 256B path 读 | 151 | — | |
+| emit 内：**submit（实时 wakeup）** | **3,218** | — | 跨核唤醒消费线程的调度成本 |
+
+**结论（二选一：两者皆有，分别处置）**：
+1. **实现问题 → 已修复**：`file_permission` 及 chmod/chown/unlink/rename/mmap
+   五个 hook 中的调试 bpf_printk 与 fname 预读全部移除（`bpf/lsm_file.bpf.c`）。
+   收益：命中路径 -0.9μs/事件、全系统未命中路径 -87ns/次、emit 段 -1.2μs。
+2. **挂载/传输固有开销 → 降级记录**（PRD 允许）：clean 逻辑下探针内
+   ≈3.6μs/事件，其中 ringbuf 实时 submit 的 wakeup 占 ~3.2μs——这是
+   "事件实时送达告警"的固有成本，非实现缺陷。
+
+**修复后复测**（15 轮 ×10,000 次 open+write+close，中位数）：
+
+| 口径 | OFF | ON | 差值 | W3 同口径 |
+|---|---|---|---|---|
+| P50 | 2,524 | 5,426 | **+2.9μs** | +4.2μs |
+| avg | 2,716 | 8,994 | **+6.3μs**（≈2 事件/轮 × 3.6μs，与探针内测量吻合） | — |
+| P99 | 4,562 | 35,021 | **+30.5μs** | +34.6μs |
+| P999 | 25,939 | 63,253 | +37.3μs | — |
+
+P99 尾部开销远超探针内稳态成本（均值仅 +6.3μs）：实时 wakeup 唤醒消费线程
+与被测线程争抢 CPU 的调度干扰尾，非探针内耗时。**P99 ≤5μs 目标未达，按 PRD
+"归因 + 降级记录"收口**：候选方向（如需进一步推进）为 NORMAL 水位也走
+BPF_RB_NO_WAKEUP 批量通知（代价：告警可见延迟 ≤100ms poll 周期，语义变化
+需评审），或 per-CPU ring（丢失全局有序，R12 已否决）。
+
+### R13-4【缺陷单】同文件多规则 inode map 碰撞 → 规则集合合并，各自独立生效
+
+**复现现场**（修复前，`tests/integration/test_multi_rule.sh`）：同一文件挂
+read/write/chmod 三条规则，仅 YAML 中最后注册的 chmod 规则存活——read 与
+write 事件 BPF 侧根本不上报（`read告警=0`，仅 chmod 产生 1 条告警且因
+`mask=0` 被误标为 "-> write"）；同文件两条 write 规则仅 1 条告警。
+MR-101/103/104 FAIL。
+
+**根因**：`monitor_actions` map 以 inode 为 key、单 `monitor_rule` 为 value，
+`common_monitor_init` 对同 inode 逐条 `BPF_ANY` 更新 → 后写覆盖先写；用户态
+`FileRuleTable::Build` 的 `inode_to_rule[ino] = rule` 同样 last-wins。
+
+**修复选型**：选"用户态按 inode 合并 + map value 改规则集合"，理由——
+单 key 单查找不变，热路径只多 ≤4 次内存比较（verifier 有界 unroll）；
+value 3B→13B ×8,192 项，map 内存增量可忽略；告警按规则独立生成天然在用户态
+一对多展开，无需 BPF 侧多发事件。未选"单规则多 action 合并"：单 value 无法
+表达"read=ALERT / write=BLOCK"的按事件类型分粒度动作（合并后会误 BLOCK
+read）。改动：
+
+| 层 | 措施 | 文件 |
+|---|---|---|
+| BPF | value `monitor_rule` → `monitor_rule_set{count, rules[4]}`；`match_rule_set()` 逐条匹配取最强 action/最高 severity；6 个 hook（file_permission/chmod/chown/unlink/rename/mmap）全部切换 | `bpf/event.h`、`bpf/bpf_common.h`、`bpf/lsm_file.bpf.c` |
+| BPF | kprobe 降级路径同步切换；**顺带修复遗留 bug**：`mask & EVENT_READ(1)` 误判（MAY_READ=4，原码 read 永不命中）并归一化 mask 与 LSM 路径一致 | `bpf/lsm_kprobe.bpf.c` |
+| 用户态 | `common_monitor_init` 按 inode 分组构建 rule_set 一次写入；>4 条保留最强 4 条并 warn；基线伪规则保持"YAML 规则优先"语义 | `src/baseline/monitor.cpp` |
+| 用户态 | `FileRuleTable::inode_to_rules` 一对多；`process_event_core` 逐规则独立走白名单抑制与告警；`inode_to_hashes` 同理多值 | `src/baseline/monitor.cpp` |
+
+**回归**：新增 `tests/integration/test_multi_rule.sh`（MR-101~104：read/
+write/chmod 三规则各自独立 + 同事件类型双规则各告警）修复后 **4/4 PASS**；
+`make` 全绿；unit 55/55 PASS；`test_snapshot.sh` 过；`test_check.sh` 16/16
+过（sudo）；`test_monitor.sh` INT-011~015 全过（含 BLOCK 拦截）；30s 10k/s
+吞吐冒烟 bus.queue_full.hi.* 全 0。
+
+**已知边界（记录，非本次范围）**：①SIGHUP 热加载只更新用户态规则表，不刷
+BPF map（新增/删除规则需重启 monitor 才在 BPF 侧生效，为既有缺口）；
+②map key 仅 i_ino 无 st_dev，跨文件系统同 inode 号仍会碰撞（修复需 key
+扩至 16B，影响面大，单独立项）。
+
+### R13-1 验收补充：30 分钟 RSS 运行（任务 1 验收口径）
+
+同 W3 基线口径（tests/perf/config.yaml，VmRSS 每 60s 采样 ×30，第 15 分钟
+注入 30s 10k/s 压测；原始序列 `/tmp/bg-perf/results/rss30_series.txt`）：
+
+| 口径 | W3 基线 | R13 后 |
+|---|---|---|
+| RSS 30min 均值 | —（30min 点位 252.5MB） | **125,247 kB（122.3MB）** |
+| RSS 30min 峰值 | 260,944 kB（VmHWM） | **126,788 kB（123.8MB）** |
+| 压测后驻留 | 261,584 kB | 126,476 kB（malloc_trim 生效，不滞留峰值） |
+| bus.queue_full.hi.* | 0 | 0 |
+
+**判定：≤150MB 达标（峰值余量 ~26MB），全时段平稳无爬升。**

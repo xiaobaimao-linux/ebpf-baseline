@@ -81,7 +81,8 @@ int handle_process_event(void *ctx, void *data, size_t data_sz)
     rec.category = CAT_PROCESS;
     rec.priority = PRIO_CTRL;   // hi 队列
     rec.action   = evt.kind;
-    memcpy(rec.payload_json, &evt, sizeof(evt));  // 原始事件字节，供消费线程建树/渲染
+    static_assert(sizeof(evt) <= sizeof(rec.payload_raw), "proc_event 超出 payload_raw 容量");
+    memcpy(rec.payload_raw, &evt, sizeof(evt));  // 原始事件字节，供消费线程建树/渲染
 
     bus->try_push(rec);
     return 0;

@@ -25,8 +25,9 @@ public:
     bool ok() const { return db_ != nullptr; }
 
     // 累积一条待写入事件（生成 event_id，提取列）。达到 batch_size 立即刷新。
-    // 单线程调用（消费线程）。
-    void Append(const EventRecord& rec);
+    // payload 为渲染后的 JSON（R13：不再经 EventRecord 槽位中转，避免 2048B/槽
+    // 的常驻开销）；长度不含结尾 NUL。单线程调用（消费线程）。
+    void Append(const EventRecord& rec, const char* payload, size_t payload_len);
 
     // 缓冲非空且距上次刷新 >= batch_ms 时刷新一事务
     void FlushIfDue();

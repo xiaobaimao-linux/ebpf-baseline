@@ -21,8 +21,45 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 8192);
     __type(key, unsigned long);
-    __type(value, struct monitor_rule);
+    __type(value, struct monitor_rule_set);
 } monitor_actions SEC(".maps");
+
+/* 规则集合匹配结果：命中规则中最强 action（数值大者强）与最高 severity */
+struct rule_match_result {
+    unsigned char action;
+    unsigned char severity;
+    unsigned char matched;
+};
+
+/* 遍历同 inode 规则集合：read_hit/write_hit 为本次访问按 READ/WRITE 语义
+ * 命中（内核 mask 已换算）；single_bit 为非读写类事件的 EVENT_MASK_BIT 位
+ * （读写类传 0）。未命中任何规则时 matched=0。 */
+static __always_inline struct rule_match_result match_rule_set(
+        const struct monitor_rule_set *set, int read_hit, int write_hit,
+        unsigned char single_bit)
+{
+    struct rule_match_result m = {ACTION_LOG, SEVERITY_LOW, 0};
+    if (!set)
+        return m;
+#pragma unroll
+    for (int i = 0; i < MAX_RULES_PER_INO; i++) {
+        if (i >= set->count)
+            break;
+        const struct monitor_rule *r = &set->rules[i];
+        int hit = single_bit
+                  ? (r->events_mask & single_bit)
+                  : ((read_hit && (r->events_mask & EVENT_READ)) ||
+                     (write_hit && (r->events_mask & EVENT_WRITE)));
+        if (!hit)
+            continue;
+        m.matched = 1;
+        if (r->action > m.action)
+            m.action = r->action;
+        if (r->severity > m.severity)
+            m.severity = r->severity;
+    }
+    return m;
+}
 
 /* ── per-CPU 丢包/对账统计（槽位定义见 stats_slots.h）────────────── */
 struct {

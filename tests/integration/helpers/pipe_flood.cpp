@@ -142,17 +142,20 @@ int main(int argc, char** argv) {
     std::thread consumer([&] {
         auto handle = [&](EventRecord& rec) {
             bus.record_queue_latency(now_monotonic_ns() - rec.enqueue_ts_ns);
-            // 富化（可选）：解析 payload → 追加 process.ancestors → 写回落库。
+            // 富化（可选）：解析 payload → 追加 process.ancestors → 随 Append 直传。
             // 吞吐压测默认关闭，避免 json 解析开销拖慢消费导致 lo 队列误丢。
             if (cfg.enrich) {
-                json j = json::parse(rec.payload_json, nullptr, false);
+                json j = json::parse(rec.payload_raw, nullptr, false);
                 if (!j.is_discarded()) {
                     enricher.enrich(rec, j);
                     const std::string s = j.dump();
-                    record_set_str(rec.payload_json, sizeof(rec.payload_json), s.c_str(), s.size());
+                    store.Append(rec, s.c_str(), s.size());
+                    consumed.fetch_add(1);
+                    return;
                 }
             }
-            store.Append(rec);
+            store.Append(rec, rec.payload_raw,
+                         strnlen(rec.payload_raw, sizeof(rec.payload_raw)));
             consumed.fetch_add(1);
         };
         while (!stop.load()) {
@@ -236,7 +239,7 @@ int main(int argc, char** argv) {
         rec.action = 1;
         const char* cat_str = CategoryToString(cat);
         std::string payload = flood_payload(cat_str, rec.pid, rec.ts_ns);
-        record_set_str(rec.payload_json, sizeof(rec.payload_json), payload.c_str(), payload.size());
+        record_set_str(rec.payload_raw, sizeof(rec.payload_raw), payload.c_str(), payload.size());
 
         attempted.fetch_add(1);
         if (bus.try_push(rec))
