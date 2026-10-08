@@ -17,7 +17,7 @@ CONFIG_SRCS = $(SRC_DIR)/cli/config.cpp $(SRC_DIR)/common/utils.cpp
 all: unit integration
 
 # ====== 单元测试 ======
-unit: test_config test_utils test_watermark test_event_bus test_process_tree test_whitelist test_rule_dsl test_gpu_collector test_model_files
+unit: test_config test_utils test_watermark test_event_bus test_process_tree test_whitelist test_rule_dsl test_gpu_collector test_model_files test_ai_workload
 	@echo "=== Running unit tests ==="
 	./test_config
 	./test_utils
@@ -28,6 +28,7 @@ unit: test_config test_utils test_watermark test_event_bus test_process_tree tes
 	./test_rule_dsl
 	./test_gpu_collector
 	./test_model_files
+	./test_ai_workload
 
 test_config: unit/test_config.cpp $(CONFIG_SRCS)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(CONFIG_SRCS) $(LDFLAGS_COMMON) $(LDFLAGS_SSL)
@@ -58,6 +59,9 @@ test_gpu_collector: unit/test_gpu_collector.cpp $(SRC_DIR)/asset/gpu_collector.c
 test_model_files: unit/test_model_files.cpp $(SRC_DIR)/asset/model_file_collector.cpp
 	$(CXX) $(CXXFLAGS) -I$(SRC_DIR)/asset -o $@ $< $(SRC_DIR)/asset/model_file_collector.cpp $(LDFLAGS_COMMON)
 
+test_ai_workload: unit/test_ai_workload.cpp $(SRC_DIR)/asset/asset_collector.cpp
+	$(CXX) $(CXXFLAGS) -I$(SRC_DIR)/asset -o $@ $< $(SRC_DIR)/asset/asset_collector.cpp $(LDFLAGS_COMMON)
+
 # ====== 集成测试 ======
 integration:
 	@echo "=== Running integration tests ==="
@@ -71,5 +75,5 @@ e2e:
 	bash e2e/test_workflow.sh
 
 clean:
-	rm -f test_config test_utils test_watermark test_event_bus test_rule_dsl test_process_tree test_whitelist test_gpu_collector test_model_files
+	rm -f test_config test_utils test_watermark test_event_bus test_rule_dsl test_process_tree test_whitelist test_gpu_collector test_model_files test_ai_workload
 	rm -rf /tmp/baseline_test_* /tmp/baseline_monitor_test_* /tmp/baseline_rdsl_* /tmp/baseline_guard_modeltest_*

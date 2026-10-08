@@ -27,3 +27,15 @@ std::vector<AssetItem> CollectAutostart();
 
 // 定时任务：/etc/crontab、/etc/cron.d/*、/var/spool/cron/crontabs/*、/var/spool/cron/*
 std::vector<AssetItem> CollectCron();
+
+// W5 AI 工作负载进程识别（纯函数，不读 /proc，供单测直接喂字符串）。
+// 命中任一特征即视为 AI 工作负载，返回命中的信号名列表（空 = 非 AI）：
+//   cmdline 含 torch/tensorflow 关键路径（site-packages/ 或 dist-packages/ 下）
+//   environ（NUL 分隔原始内容）按变量边界含 CUDA_VISIBLE_DEVICES
+//   maps 加载了 /libcuda.so 或 /libnvidia-ml.so（含 .so.<ver> 后缀）
+// 普通 "python script.py" 不命中任何特征，不会误判。
+std::vector<std::string> AiWorkloadSignals(const std::string& cmdline,
+                                           const std::string& environ,
+                                           const std::string& maps);
+bool IsAiWorkload(const std::string& cmdline, const std::string& environ,
+                  const std::string& maps);

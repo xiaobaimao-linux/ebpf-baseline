@@ -18,5 +18,12 @@
     `~/.cache/huggingface`、`/data`、`/models`，`asset collect -c config.yaml` 指定），
     匹配 `.pt/.safetensors/.gguf/.onnx/.ckpt`，记录路径/大小/mtime；目录不存在跳过、
     递归深度 ≤4 层、不跟随符号链接。
+  - AI 工作负载进程识别（W5 D2）：`CollectProcesses` 对每进程判定
+    `AiWorkloadSignals(cmdline, environ, maps)`（纯函数，特征：torch/tensorflow 的
+    site-/dist-packages 路径、`CUDA_VISIBLE_DEVICES` 环境变量、maps 加载
+    libcuda/libnvidia-ml），命中即在 process 资产 detail_json 标 `ai_workload=true`
+    及 `ai_signals`；普通 `python script.py` 不命中。进程采集跳过采集器自身与
+    内核线程/僵尸（空 cmdline），保证重复采集幂等。告警联动升级设计见
+    `docs/ai-alert-escalation.md`（实现排 W6）。
 
 预留（后续版本）：主机指纹、容器/K8s 资产、昇腾/海光 GPU 采集实现、账号资产、脆弱性初筛。

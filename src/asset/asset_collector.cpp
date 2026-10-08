@@ -443,6 +443,47 @@ int64_t ReadRealUid(const std::string& status_content) {
     return -1;
 }
 
+// ---------------- AI 工作负载特征匹配 ----------------
+
+// cmdline 命中 torch/tensorflow 关键路径（site-packages/dist-packages 下的包目录）
+std::vector<std::string> MatchCmdlineAiSignals(const std::string& cmdline) {
+    std::vector<std::string> signals;
+    for (const char* framework : {"torch", "tensorflow"}) {
+        for (const char* prefix : {"site-packages/", "dist-packages/"}) {
+            if (cmdline.find(std::string(prefix) + framework) != std::string::npos) {
+                signals.push_back(std::string("cmdline:") + framework + "_path");
+                break;
+            }
+        }
+    }
+    return signals;
+}
+
+// environ 为 NUL 分隔的 KEY=VALUE，按变量边界匹配（避免 X_CUDA_VISIBLE_DEVICES 误命中）
+bool EnvironHasCudaVisibleDevices(const std::string& environ) {
+    const std::string key = "CUDA_VISIBLE_DEVICES=";
+    size_t pos = 0;
+    while ((pos = environ.find(key, pos)) != std::string::npos) {
+        if (pos == 0 || environ[pos - 1] == '\0') {
+            return true;
+        }
+        pos += key.size();
+    }
+    return false;
+}
+
+// maps 行尾为映射文件绝对路径，"/libcuda.so" 同时覆盖 libcuda.so.1 等版本后缀
+std::vector<std::string> MatchMapsAiSignals(const std::string& maps) {
+    std::vector<std::string> signals;
+    if (maps.find("/libcuda.so") != std::string::npos) {
+        signals.push_back("maps:libcuda");
+    }
+    if (maps.find("/libnvidia-ml.so") != std::string::npos) {
+        signals.push_back("maps:libnvidia_ml");
+    }
+    return signals;
+}
+
 // ---------------- 自启项 ----------------
 
 // systemctl 失败时降级：扫描 /etc/systemd/system 下 .wants/.requires 软链
@@ -587,8 +628,12 @@ std::vector<AssetItem> CollectProcesses() {
     std::vector<AssetItem> items;
     const int64_t btime = ReadBtime();
     const long hz = sysconf(_SC_CLK_TCK);
+    const int self_pid = getpid();  // 采集器自身是瞬时进程，不计入资产（保证重复采集幂等）
     for (const auto& pid_dir : ListNumericDirs("/proc")) {
         const std::string pid_str = pid_dir.filename().string();
+        if (std::stoi(pid_str) == self_pid) {
+            continue;
+        }
         std::string stat;
         if (!ReadWholeFile(pid_dir.string() + "/stat", stat)) {
             continue;  // 进程退出或不可读，跳过
@@ -616,6 +661,11 @@ std::vector<AssetItem> CollectProcesses() {
             }
             cmdline = Trim(cmdline);
         }
+        // cmdline 为空 = 内核线程（kworker 等）或僵尸进程：内核线程随内核调度频繁
+        // 生灭，计入会导致重复采集行数永不收敛，且非用户态工作负载，跳过
+        if (cmdline.empty()) {
+            continue;
+        }
         char exe_buffer[4096];
         std::string exe;
         const ssize_t n = readlink((pid_dir.string() + "/exe").c_str(), exe_buffer,
@@ -628,6 +678,22 @@ std::vector<AssetItem> CollectProcesses() {
             start_iso = EpochToIso(static_cast<std::time_t>(
                 btime + static_cast<double>(start_ticks) / hz));
         }
+        // W5 AI 工作负载识别：cmdline 已读先行判定；未命中再按需读 environ/maps
+        // （maps 较大，仅在前两个特征都没命中时读取，降低全进程扫描开销）
+        std::vector<std::string> ai_signals = MatchCmdlineAiSignals(cmdline);
+        if (ai_signals.empty()) {
+            std::string environ;
+            if (ReadWholeFile(pid_dir.string() + "/environ", environ) &&
+                EnvironHasCudaVisibleDevices(environ)) {
+                ai_signals.push_back("env:CUDA_VISIBLE_DEVICES");
+            }
+        }
+        if (ai_signals.empty()) {
+            std::string maps;
+            if (ReadWholeFile(pid_dir.string() + "/maps", maps)) {
+                ai_signals = MatchMapsAiSignals(maps);
+            }
+        }
         json detail;
         detail["pid"] = std::stoi(pid_str);
         detail["ppid"] = ppid;
@@ -636,6 +702,10 @@ std::vector<AssetItem> CollectProcesses() {
         detail["cmdline"] = cmdline;
         detail["uid"] = uid;
         detail["start_time"] = start_iso;
+        detail["ai_workload"] = !ai_signals.empty();
+        if (!ai_signals.empty()) {
+            detail["ai_signals"] = ai_signals;
+        }
         items.push_back(
             {/*asset_type=*/"process", comm + "(" + pid_str + ")", detail.dump()});
     }
@@ -782,4 +852,21 @@ std::vector<AssetItem> CollectCron() {
         }
     }
     return items;
+}
+
+std::vector<std::string> AiWorkloadSignals(const std::string& cmdline,
+                                           const std::string& environ,
+                                           const std::string& maps) {
+    std::vector<std::string> signals = MatchCmdlineAiSignals(cmdline);
+    if (EnvironHasCudaVisibleDevices(environ)) {
+        signals.push_back("env:CUDA_VISIBLE_DEVICES");
+    }
+    std::vector<std::string> maps_signals = MatchMapsAiSignals(maps);
+    signals.insert(signals.end(), maps_signals.begin(), maps_signals.end());
+    return signals;
+}
+
+bool IsAiWorkload(const std::string& cmdline, const std::string& environ,
+                  const std::string& maps) {
+    return !AiWorkloadSignals(cmdline, environ, maps).empty();
 }
