@@ -26,14 +26,14 @@ struct ListOptions {
 };
 
 const std::set<std::string> kKnownTypes = {"package", "port", "process", "autostart",
-                                           "cron"};
+                                           "cron", "gpu", "model_file"};
 
 void PrintUsage() {
     std::cout << "Usage: baseline-guard asset list [options]\n"
               << "List host assets from the SQLite assets table.\n"
               << "\n"
               << "Options:\n"
-              << "  --type T     filter by asset type: package|port|process|autostart|cron\n"
+              << "  --type T     filter by asset type: package|port|process|autostart|cron|gpu|model_file\n"
               << "  --db PATH    SQLite database path\n"
               << "  --limit N    maximum number of rows to return\n"
               << "  --offset N   pagination offset (default: 0)\n"
@@ -123,7 +123,7 @@ bool ParseOptions(int argc, char* argv[], ListOptions& options, bool& help,
     }
     if (!options.asset_type.empty() && kKnownTypes.count(options.asset_type) == 0) {
         error = "unknown asset type: " + options.asset_type +
-                " (expected package|port|process|autostart|cron)";
+                " (expected package|port|process|autostart|cron|gpu|model_file)";
         return false;
     }
     return true;

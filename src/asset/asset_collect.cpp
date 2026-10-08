@@ -3,9 +3,12 @@
 #include "asset_collector.hpp"
 #include "baseline_db.hpp"
 #include "commonfun.hpp"
+#include "gpu_collector.hpp"
+#include "model_file_collector.hpp"
 #include "utils.hpp"
 
 #include <spdlog/spdlog.h>
+#include <yaml-cpp/yaml.h>
 
 #include <exception>
 #include <iostream>
@@ -16,20 +19,52 @@ namespace {
 
 struct CollectOptions {
     std::string db_path = "/var/lib/baseline-guard/baseline.db";
+    std::string config_path;  // 可选：读 asset.model_scan_dirs，缺省用内置默认目录
 };
 
 void PrintUsage() {
     std::cout << "Usage: baseline-guard asset collect [options]\n"
               << "Collect host assets (packages, listening ports, processes,\n"
-              << "autostart entries, cron jobs) into the SQLite assets table.\n"
+              << "autostart entries, cron jobs, GPUs, model files) into the SQLite\n"
+              << "assets table.\n"
               << "\n"
               << "Options:\n"
-              << "  --db PATH    SQLite database path\n"
-              << "  -h, --help   display this message\n"
+              << "  --db PATH       SQLite database path\n"
+              << "  -c, --config PATH  config.yaml with asset.model_scan_dirs\n"
+              << "                     (default scan dirs: ~/.cache/huggingface /data /models)\n"
+              << "  -h, --help      display this message\n"
               << "\n"
               << "Examples:\n"
               << "  baseline-guard asset collect\n"
-              << "  baseline-guard asset collect --db /tmp/assets.db\n";
+              << "  baseline-guard asset collect --db /tmp/assets.db -c config.yaml\n";
+}
+
+// 从 config.yaml 读 asset.model_scan_dirs；读取失败/缺节点记 warn 用默认目录
+std::vector<std::string> LoadModelScanDirs(const std::string& config_path) {
+    if (config_path.empty()) {
+        return DefaultModelScanDirs();
+    }
+    try {
+        const YAML::Node root = YAML::LoadFile(config_path);
+        const YAML::Node dirs = root["asset"]["model_scan_dirs"];
+        std::vector<std::string> out;
+        if (dirs && dirs.IsSequence()) {
+            for (const auto& item : dirs) {
+                if (item && item.IsScalar()) {
+                    out.push_back(item.as<std::string>());
+                }
+            }
+        }
+        if (!out.empty()) {
+            return out;
+        }
+        spdlog::warn("[asset_collect] {} has no asset.model_scan_dirs, use defaults",
+                     config_path);
+    } catch (const YAML::Exception& ex) {
+        spdlog::warn("[asset_collect] failed to parse {}: {}, use default scan dirs",
+                     config_path, ex.what());
+    }
+    return DefaultModelScanDirs();
 }
 
 bool ParseOptions(int argc, char* argv[], CollectOptions& options, bool& help,
@@ -47,6 +82,13 @@ bool ParseOptions(int argc, char* argv[], CollectOptions& options, bool& help,
             }
         } else if (arg.rfind("--db=", 0) == 0) {
             options.db_path = arg.substr(5);
+        } else if (arg == "-c" || arg == "--config") {
+            if (!TakeArgValue(i, argc, argv, arg, options.config_path)) {
+                error = "missing value for " + arg;
+                return false;
+            }
+        } else if (arg.rfind("--config=", 0) == 0) {
+            options.config_path = arg.substr(9);
         } else {
             error = "unknown collect option: " + arg;
             return false;
@@ -90,6 +132,8 @@ int RunAssetCollect(int argc, char* argv[]) {
 
     try {
         BaselineDB db(options.db_path);
+        const std::vector<std::string> model_scan_dirs =
+            LoadModelScanDirs(options.config_path);
 
         struct CollectedBatch {
             const char* type;
@@ -101,6 +145,10 @@ int RunAssetCollect(int argc, char* argv[]) {
             {"process", SafeCollect("process", CollectProcesses)},
             {"autostart", SafeCollect("autostart", CollectAutostart)},
             {"cron", SafeCollect("cron", CollectCron)},
+            {"gpu", SafeCollect("gpu", CollectGpus)},
+            {"model_file",
+             SafeCollect("model_file",
+                         [&] { return CollectModelFiles(model_scan_dirs); })},
         };
 
         int total_new = 0;

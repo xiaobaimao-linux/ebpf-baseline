@@ -66,6 +66,8 @@ MAIN_SRCS = src/main.cpp \
             src/asset/asset_collect.cpp \
             src/asset/asset_list.cpp \
             src/asset/asset_collector.cpp \
+            src/asset/gpu_collector.cpp \
+            src/asset/model_file_collector.cpp \
             src/baseline/baseline_check.cpp \
             src/baseline/baseline_clean.cpp \
             src/baseline/baseline_delete.cpp \
