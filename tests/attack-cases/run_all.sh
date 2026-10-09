@@ -1,5 +1,5 @@
 #!/bin/bash
-# 攻击用例库批量执行：启动 monitor，6 个用例连跑 2 遍，输出 PASS/FAIL 汇总。
+# 攻击用例库批量执行：启动 monitor，14 个用例连跑 2 遍，输出 PASS/FAIL 汇总。
 # 用法: sudo -n bash tests/attack-cases/run_all.sh        （需要 root：加载 eBPF + 部分攻击动作用 root）
 # 退出码: 0 = 全部用例 × 2 轮 PASS；1 = 有失败项。
 set -u
@@ -11,7 +11,11 @@ PIDFILE="${WORK_DIR}/monitor.pid"
 ROUNDS=2
 
 CASES="case-01-reverse-shell case-02-read-etc-shadow case-03-chmod-777 \
-       case-04-docker-sock-container case-05-batch-sensitive-read case-06-container-mount-tamper"
+       case-04-docker-sock-container case-05-batch-sensitive-read case-06-container-mount-tamper \
+       case-07-exec-reverse-shell-interpreter case-08-exec-reverse-shell-dualuse \
+       case-09-exec-suspicious-tmp-binary case-10-exec-webspawner-shell \
+       case-11-cred-read-shadow case-12-cred-write-passwd \
+       case-13-cred-tamper-authorized-keys case-14-cred-clear-history"
 
 cd "$ROOT_DIR"
 mkdir -p "$WORK_DIR"
@@ -32,6 +36,17 @@ EOF
 cat > "$WORK_DIR/protected-baseline.conf" <<'EOF'
 # baseline-guard 受保护基线文件（攻击用例库测试对象）
 config_value=original
+EOF
+# W6 D1 凭据类用例的测试文件（必须在 monitor 启动前存在：inode 注册在启动时完成；
+# 用例只做追加/截断，不删除重建，避免 inode 变化导致第 2 轮无事件）
+cp /etc/passwd "$WORK_DIR/passwd-copy"
+mkdir -p "$WORK_DIR/fakehome/.ssh"
+cat > "$WORK_DIR/fakehome/.ssh/authorized_keys" <<'EOF'
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBaselineGuardTestKeyOwner owner@test
+EOF
+cat > "$WORK_DIR/fakehome/.bash_history" <<'EOF'
+ls -la
+cat /etc/passwd
 EOF
 # /root/.ssh/id_rsa 不存在时生成临时假密钥，cleanup 会删除
 if [ ! -f /root/.ssh/id_rsa ]; then
@@ -71,7 +86,7 @@ for round in $(seq 1 "$ROUNDS"); do
         out=$(bash "tests/attack-cases/$c/verify.sh" "$tag")
         echo "$out" | sed "s/^/[$name r$round] /"
         echo "[$name r$round] $out" | grep -o "PASS.*\|FAIL.*" >> "$WORK_DIR/results.txt"
-        echo "[$name r$round] $out" | grep -q "^FAIL" && overall=1
+        echo "[$name r$round] $out" | grep -q "FAIL" && overall=1
         bash "tests/attack-cases/$c/cleanup.sh" >/dev/null 2>&1
     done
     # throttle=10s，等它过期再跑下一轮，保证每轮告警都能落库

@@ -52,6 +52,39 @@ rules:
       events: ["write", "delete", "chmod"]
       action: "alert"
 
+  # W6 D1 凭据类规则用例：file 事件仅覆盖注册的 inode，DSL 规则内路径必须先在此注册
+  - id: "AC-12"
+    name: "监控 /etc/passwd 写入 - cred-write-passwd 用例"
+    severity: "high"
+    monitor:
+      path: "/etc/passwd"
+      events: ["write", "delete", "chmod"]
+      action: "alert"
+
+  - id: "AC-12B"
+    name: "监控 passwd 测试替身 - passwd-copy"
+    severity: "high"
+    monitor:
+      path: "/tmp/bg-attack-cases/passwd-copy"
+      events: ["write", "delete", "chmod"]
+      action: "alert"
+
+  - id: "AC-13"
+    name: "监控 authorized_keys 测试文件"
+    severity: "high"
+    monitor:
+      path: "/tmp/bg-attack-cases/fakehome/.ssh/authorized_keys"
+      events: ["write", "delete", "chmod"]
+      action: "alert"
+
+  - id: "AC-14"
+    name: "监控 bash_history 测试文件"
+    severity: "medium"
+    monitor:
+      path: "/tmp/bg-attack-cases/fakehome/.bash_history"
+      events: ["write", "delete"]
+      action: "alert"
+
 alert:
   dingtalk:
     webhook: ""
@@ -61,7 +94,7 @@ alert:
 db:
   retention_days: 30
 
-# W4 D3-D4：DSL 示例规则端到端验证（rules/examples/）
+# W6 D1：rules_dir 上移到 rules/（递归加载），core 新规则与 examples 示例同时生效
 rule_engine:
   enabled: true
-  rules_dir: "rules/examples"
+  rules_dir: "rules"
