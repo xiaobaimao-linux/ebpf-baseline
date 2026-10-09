@@ -95,6 +95,16 @@ void AlertManager::SetDB(BaselineDB* db) {
     }
 }
 
+void AlertManager::UpdateNotifyConfig(const NotifyConfig& notify_cfg) {
+    notify_dispatcher_.UpdateConfig(notify_cfg);
+    spdlog::info("[notify] config applied: enabled={} min_level={} silence={}min",
+                 notify_cfg.enabled, notify_cfg.min_level, notify_cfg.silence_minutes);
+}
+
+NotifyStats AlertManager::GetNotifyStats() const {
+    return notify_dispatcher_.Stats();
+}
+
 bool AlertManager::IsEnabled() const {
     return !dingtalk_url_.empty();
 }
@@ -323,6 +333,10 @@ bool AlertManager::SendDingTalk(const AlertEvent& event) {
 
     // 4. 落库（未节流路径）
     SaveAlertToDB(event, dingtalk_sent);
+
+    // 5. 外发投递（W5 D4）：落库完成之后异步入队，只投递不等待；
+    //    路由/静默/重试全在 dispatcher 内，任何失败都不影响已完成的落库
+    notify_dispatcher_.Dispatch(event);
 
     return dingtalk_sent;
 }

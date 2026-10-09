@@ -15,6 +15,7 @@
 #include "monitor.hpp"
 #include "utils.hpp"
 #include "report_generator.hpp"
+#include "severity.hpp"
 #include "stats.hpp"
 
 
@@ -52,6 +53,9 @@ void PrintAlertsUsage() {
     printf("  --today               only show alerts from today\n");
     printf("  --rule=<name>         filter by rule_id/rule_name\n");
     printf("  --rule <name>         same as above\n");
+    printf("  --severity <level>    filter by severity: critical/high/medium/low\n");
+    printf("  --stats               aggregate alert counts by severity x rule_id\n");
+    printf("  --since <window>      stats time window, e.g. 1h / 24h / 30m / 7d (only with --stats)\n");
 }
 
 void PrintReportUsage() {
@@ -161,7 +165,7 @@ void PrintAlerts(const std::vector<AlertRecord> &records) {
 
         const std::string push_text = record.dingtalk_sent ? "✓已推送钉钉" : "✗未推送";
 
-        std::cout << std::left << std::setw(19) << timestamp << "  [" << std::setw(5) << severity
+        std::cout << std::left << std::setw(19) << timestamp << "  [" << std::setw(8) << severity
                   << "]"
                   << "   " << std::setw(12) << rule_name << "   " << std::setw(16)
                   << record.file_path << "   " << std::setw(14)
@@ -170,6 +174,33 @@ void PrintAlerts(const std::vector<AlertRecord> &records) {
                   << std::setw(14) << (user_text + "(" + user_uid_text + ")") << "   "
                   << std::setw(14) << details << "   " << push_text << std::endl;
     }
+}
+
+// --since 秒数 → 归一化时间下限（本地时间，与 DB 侧 recorded_at 归一化口径一致）
+std::string CutoffTimeString(long long seconds_ago) {
+    const std::time_t t = std::time(nullptr) - static_cast<std::time_t>(seconds_ago);
+    char buf[32] = {};
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+    return buf;
+}
+
+// alerts --stats 输出：severity × rule_id 聚合计数表 + 合计行（供与表行数对账）
+void PrintAlertStats(const std::vector<AlertStatRow> &rows, const std::string &since_spec) {
+    if (since_spec.empty()) {
+        std::cout << "Alert stats (all time)" << std::endl;
+    } else {
+        std::cout << "Alert stats (since " << since_spec << ")" << std::endl;
+    }
+    std::cout << std::left << std::setw(10) << "SEVERITY" << std::setw(44) << "RULE_ID"
+              << "COUNT" << std::endl;
+    long long total = 0;
+    for (const auto &row : rows) {
+        std::cout << std::left << std::setw(10) << row.severity << std::setw(44) << row.rule_id
+                  << row.count << std::endl;
+        total += row.count;
+    }
+    std::cout << std::left << std::setw(10) << "TOTAL" << std::setw(44) << "-" << total
+              << std::endl;
 }
 
 } // namespace
@@ -343,6 +374,9 @@ int main(int argc, char *argv[]) {
             bool today = false;
             int limit = 20;
             std::string rule;
+            std::string severity;
+            bool stats = false;
+            std::string since_spec;
             while (j < argc) {
                 std::string subarg = argv[j];
                 if (subarg == "-n" || subarg == "--limit") {
@@ -361,6 +395,24 @@ int main(int argc, char *argv[]) {
                     }
                 } else if (subarg == "--today") {
                     today = true;
+                } else if (subarg == "--stats") {
+                    stats = true;
+                } else if (subarg.rfind("--since=", 0) == 0) {
+                    since_spec = subarg.substr(std::string("--since=").size());
+                } else if (subarg == "--since") {
+                    if (j + 1 >= argc) {
+                        fprintf(stderr, "Error: missing value for --since\n");
+                        return 1;
+                    }
+                    since_spec = argv[++j];
+                } else if (subarg.rfind("--severity=", 0) == 0) {
+                    severity = subarg.substr(std::string("--severity=").size());
+                } else if (subarg == "--severity") {
+                    if (j + 1 >= argc) {
+                        fprintf(stderr, "Error: missing value for --severity\n");
+                        return 1;
+                    }
+                    severity = argv[++j];
                 } else if (subarg == "--report_html") {
                     fprintf(
                         stderr,
@@ -396,7 +448,32 @@ int main(int argc, char *argv[]) {
                 ++j;
             }
 
-            const auto alerts = get_db().GetAlerts(rule, limit, today);
+            if (!severity.empty() && !alert::SeverityIsValid(severity)) {
+                fprintf(stderr, "Error: invalid severity: %s (critical/high/medium/low)\n",
+                        severity.c_str());
+                return 1;
+            }
+            if (!since_spec.empty() && !stats) {
+                fprintf(stderr, "Error: --since is only valid with --stats\n");
+                return 1;
+            }
+            if (stats) {
+                std::string cutoff;
+                if (!since_spec.empty()) {
+                    long long seconds = 0;
+                    if (!ParseSinceSpec(since_spec, seconds)) {
+                        fprintf(stderr,
+                                "Error: invalid --since window: %s (e.g. 1h / 24h / 30m / 7d)\n",
+                                since_spec.c_str());
+                        return 1;
+                    }
+                    cutoff = CutoffTimeString(seconds);
+                }
+                PrintAlertStats(get_db().GetAlertStats(cutoff, severity), since_spec);
+                return 0;
+            }
+
+            const auto alerts = get_db().GetAlerts(rule, severity, limit, today);
             PrintAlerts(alerts);
             return 0;
         } else if (arg == "monitor") {
@@ -474,6 +551,7 @@ int main(int argc, char *argv[]) {
                 AlertManager alert_mgr;
                 if (!config_path.empty()) {
                     alert_mgr.LoadConfig(config.alert, config.db);
+                    alert_mgr.UpdateNotifyConfig(config.notify);
                 }
                 BaselineDB alert_db;  // 使用默认路径
                 alert_mgr.SetDB(&alert_db);
@@ -540,6 +618,7 @@ int main(int argc, char *argv[]) {
 
     AlertManager alert_mgr;
     alert_mgr.LoadConfig(config.alert, config.db);
+    alert_mgr.UpdateNotifyConfig(config.notify);
     alert_mgr.SetDB(&get_db());
 
     if (alert_mgr.IsEnabled()) {

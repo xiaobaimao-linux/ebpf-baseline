@@ -5,8 +5,10 @@
 #include <cstdint>
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
+#include "alert_event.hpp"
 #include "baseline_db.hpp"
 #include "config.hpp"
+#include "notify_dispatcher.hpp"
 
 using json = nlohmann::json;
 
@@ -30,25 +32,7 @@ struct FileActorContext {
     bool valid = false;
 };
 
-struct AlertEvent {
-    std::string rule_id;
-    std::string rule_name;
-    std::string severity;
-    std::string file_path;
-    std::string expected;   // 预期值（如 0644）
-    std::string actual;     // 实际值（如 0777）
-    std::string process_name;
-    int pid = 0;
-    std::string user_name;  // 触发该告警的 Linux 用户名
-    std::string uid;        // 触发该告警的 uid（字符串）
-    std::string timestamp;
-    std::string event_type;     // 事件类型: read / write / check_fail
-    std::string action_taken;   // alert / block / report_only
-    std::string exe;            // 触发进程可执行文件路径（进程树命中时非空）
-    std::string container_id;   // 12 位容器短 ID（容器内触发时非空）
-    std::string ancestors;      // 祖先链 JSON 数组串（可为空）
-    std::string attack;         // ATT&CK 技术 ID 逗号分隔（W4 DSL 规则；FIM/基线告警为空串）
-};
+// AlertEvent 定义见 alert_event.hpp（外发渠道接口 notifier.hpp 与其共用）
 
 class AlertManager {
 public:
@@ -57,6 +41,12 @@ public:
 
     // 加载配置：alert + db
     void LoadConfig(const AlertConfig& alert_cfg, const DbConfig& db_cfg);
+
+    // 外发配置（notify: 段）：启动与 SIGHUP 热加载共用入口
+    void UpdateNotifyConfig(const NotifyConfig& notify_cfg);
+
+    // 外发计数快照（sent/failed/suppressed/dropped，自进程启动累计）
+    NotifyStats GetNotifyStats() const;
     bool IsEnabled() const;
 
     // 绑定数据库（告警统一落库）
@@ -106,6 +96,9 @@ private:
     // 节流抑制计数（被节流跳过的告警）：总数 + 按规则
     uint64_t throttled_total_ = 0;
     std::unordered_map<std::string, uint64_t> throttled_by_rule_;
+
+    // 异步外发调度器（webhook 渠道）：SendDingTalk 落库后投递，不影响落库
+    NotifyDispatcher notify_dispatcher_;
 
     static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp);
     bool PostJson(const std::string& url, const json& payload);

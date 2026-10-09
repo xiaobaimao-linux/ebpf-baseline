@@ -42,6 +42,13 @@ alert:
     secret: ""
   throttle: 300
 
+# ── 告警外发（webhook 渠道，W5 D4；SIGHUP 热加载生效）──
+notify:
+  enabled: false             # 外发总开关
+  webhook_url: ""            # HTTP POST JSON 目标，如 http://127.0.0.1:9000/alert
+  min_level: "high"          # 外发最低级别：critical/high 外发，medium/low 仅落库
+  silence_minutes: 10        # 同 (rule_id, 对象) 静默窗口，窗口内重复仅落库；0=关闭
+
 # ── 资产采集（asset collect 周期任务，与事件链路无关）──
 asset:
   model_scan_dirs:           # 模型文件扫描目录（不存在/权限不足自动跳过，深度 ≤4 层）

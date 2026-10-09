@@ -202,7 +202,7 @@ static void monitor_sighup_handler(int) {
     g_sighup_pending = 1;
 }
 
-static void reload_monitor_config(const std::string& config_path) {
+static void reload_monitor_config(const std::string& config_path, AlertManager& alert_mgr) {
     Config new_config;
     std::string err;
     if (!tryParseYamlFile(config_path, new_config, err)) {
@@ -225,6 +225,8 @@ static void reload_monitor_config(const std::string& config_path) {
         g_rule_engine = std::move(new_engine);
     }
     g_whitelist_matcher.ClearCache();
+    // notify 外发配置随热加载生效（min_level / webhook_url / silence_minutes）
+    alert_mgr.UpdateNotifyConfig(new_config.notify);
     spdlog::info("config reloaded ({} rules)", new_config.rules.size());
 }
 
@@ -239,6 +241,14 @@ static void log_suppressed_stats(const AlertManager* alert_mgr = nullptr) {
         spdlog::info("[alerts] throttled: total={}", alert_mgr->ThrottledTotal());
         for (const auto& [rule_id, n] : alert_mgr->ThrottledByRule())
             spdlog::info("[alerts] throttled: rule={} count={}", rule_id, n);
+    }
+    // 外发计数（W5 D4）：有任一非零才打行
+    if (alert_mgr != nullptr) {
+        const NotifyStats ns = alert_mgr->GetNotifyStats();
+        if (ns.sent > 0 || ns.failed > 0 || ns.suppressed > 0 || ns.dropped > 0) {
+            spdlog::info("[notify] stats: sent={} failed={} suppressed={} dropped={}",
+                         ns.sent, ns.failed, ns.suppressed, ns.dropped);
+        }
     }
 }
 
@@ -904,7 +914,7 @@ static int run_perf_buffer_loop(struct perf_buffer *pb,
         // SIGHUP 热加载：handler 只置标志，此处每轮检查（成功替换快照，失败保留旧配置）
         if (g_sighup_pending) {
             g_sighup_pending = 0;
-            reload_monitor_config(config_path);
+            reload_monitor_config(config_path, alert_mgr);
         }
 
         FlushEventBatch(&mctx);
@@ -1824,7 +1834,7 @@ static int do_monitor_ringbuf(const Config& config, AlertManager &alert_mgr,
         // SIGHUP 热加载：handler 只置标志，此处每轮检查（成功替换快照，失败保留旧配置）
         if (g_sighup_pending) {
             g_sighup_pending = 0;
-            reload_monitor_config(config_path);
+            reload_monitor_config(config_path, alert_mgr);
         }
         // retention 已移至消费线程（避免与文件处理并发访问 AlertManager）
     }

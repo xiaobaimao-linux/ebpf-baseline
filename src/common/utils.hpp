@@ -17,6 +17,10 @@ std::string NormalizePath(const std::string& value);
 // 命令行参数解析辅助：从 argv[(*idx)+1] 取下一个值
 bool TakeArgValue(int& idx, int argc, char* argv[], const std::string& opt, std::string& target);
 
+// 解析 --since 时间窗规格（数字+单位后缀 s/m/h/d，如 1h、24h、7d）为秒数；
+// 非法（空串/非数字/未知后缀/非正值/溢出）返回 false
+bool ParseSinceSpec(const std::string& spec, long long& seconds_out);
+
 // 权限/宿主比对结果（has_diff=false 时表示完全一致）
 struct PermOwnershipDiff {
     bool has_diff = false;

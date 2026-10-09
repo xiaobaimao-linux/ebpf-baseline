@@ -172,8 +172,8 @@ void test_syntax_error_op() {
     printf("[PASS] RDSL-005: 非法操作符报错（%s）\n", err.c_str());
 }
 
-// ====== RDSL-006: 缺必填字段（priority）报错 ======
-void test_missing_required() {
+// ====== RDSL-006: priority 缺省补 medium（W5 D3：可选字段，解析不报错）======
+void test_priority_default() {
     std::vector<Rule> rules;
     std::string err;
     const std::string content = "- rule: R1\n"
@@ -183,11 +183,29 @@ void test_missing_required() {
                                 "  attack: [T1000]\n"
                                 "  fpr_note: x\n"
                                 "  response: x\n";
+    const bool ok = load_single("noprio", "noprio.yaml", content, rules, err);
+    assert(ok && err.empty());
+    assert(rules.size() == 1);
+    assert(rules[0].priority == "medium");
+    printf("[PASS] RDSL-006: priority 缺省补 medium\n");
+}
+
+// ====== RDSL-006b: 缺其他必填字段（output）仍报错 ======
+void test_missing_required() {
+    std::vector<Rule> rules;
+    std::string err;
+    const std::string content = "- rule: R1\n"
+                                "  desc: x\n"
+                                "  condition: event_type = file.read\n"
+                                "  priority: high\n"
+                                "  attack: [T1000]\n"
+                                "  fpr_note: x\n"
+                                "  response: x\n";
     const bool ok = load_single("missing", "missing.yaml", content, rules, err);
     assert(!ok);
     assert(err.find("missing.yaml:1:") != std::string::npos);
-    assert(err.find("priority") != std::string::npos);
-    printf("[PASS] RDSL-006: 缺必填字段报错（%s）\n", err.c_str());
+    assert(err.find("output") != std::string::npos);
+    printf("[PASS] RDSL-006b: 缺必填字段报错（%s）\n", err.c_str());
 }
 
 // ====== RDSL-007: priority 非法值报错 ======
@@ -468,6 +486,7 @@ int main() {
     test_unknown_field();
     test_syntax_error_paren();
     test_syntax_error_op();
+    test_priority_default();
     test_missing_required();
     test_bad_priority();
     test_dup_name();

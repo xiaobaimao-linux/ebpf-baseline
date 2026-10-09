@@ -17,7 +17,7 @@ CONFIG_SRCS = $(SRC_DIR)/cli/config.cpp $(SRC_DIR)/common/utils.cpp
 all: unit integration
 
 # ====== 单元测试 ======
-unit: test_config test_utils test_watermark test_event_bus test_process_tree test_whitelist test_rule_dsl test_gpu_collector test_model_files test_ai_workload
+unit: test_config test_utils test_watermark test_event_bus test_process_tree test_whitelist test_rule_dsl test_gpu_collector test_model_files test_ai_workload test_notify_router
 	@echo "=== Running unit tests ==="
 	./test_config
 	./test_utils
@@ -29,6 +29,7 @@ unit: test_config test_utils test_watermark test_event_bus test_process_tree tes
 	./test_gpu_collector
 	./test_model_files
 	./test_ai_workload
+	./test_notify_router
 
 test_config: unit/test_config.cpp $(CONFIG_SRCS)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(CONFIG_SRCS) $(LDFLAGS_COMMON) $(LDFLAGS_SSL)
@@ -62,6 +63,9 @@ test_model_files: unit/test_model_files.cpp $(SRC_DIR)/asset/model_file_collecto
 test_ai_workload: unit/test_ai_workload.cpp $(SRC_DIR)/asset/asset_collector.cpp
 	$(CXX) $(CXXFLAGS) -I$(SRC_DIR)/asset -o $@ $< $(SRC_DIR)/asset/asset_collector.cpp $(LDFLAGS_COMMON)
 
+test_notify_router: unit/test_notify_router.cpp $(SRC_DIR)/alerts/notify_router.hpp $(SRC_DIR)/alerts/alert_event.hpp
+	$(CXX) $(CXXFLAGS) -o $@ $<
+
 # ====== 集成测试 ======
 integration:
 	@echo "=== Running integration tests ==="
@@ -75,5 +79,5 @@ e2e:
 	bash e2e/test_workflow.sh
 
 clean:
-	rm -f test_config test_utils test_watermark test_event_bus test_rule_dsl test_process_tree test_whitelist test_gpu_collector test_model_files test_ai_workload
+	rm -f test_config test_utils test_watermark test_event_bus test_rule_dsl test_process_tree test_whitelist test_gpu_collector test_model_files test_ai_workload test_notify_router
 	rm -rf /tmp/baseline_test_* /tmp/baseline_monitor_test_* /tmp/baseline_rdsl_* /tmp/baseline_guard_modeltest_*

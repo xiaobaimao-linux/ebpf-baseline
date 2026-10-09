@@ -62,6 +62,15 @@ std::string BuildAlertsSelect(const AlertsColumns& cols) {
 
 } // namespace
 
+// recorded_at 归一化表达式（兼容 "YYYYmmdd-HH:MM:SS" 与 ISO 两种存量格式），
+// GetMonitorEvents / GetAlertStats 的时间边界比较共用
+#define BG_ALERTS_NORMALIZED_TIME                                                     \
+    "CASE WHEN length(recorded_at) >= 17 AND substr(recorded_at, 5, 1) != '-' THEN"   \
+    " substr(recorded_at, 1, 4) || '-' || substr(recorded_at, 5, 2) || '-' ||"        \
+    " substr(recorded_at, 7, 2) || ' ' || substr(recorded_at, 10, 2) || ':' ||"       \
+    " substr(recorded_at, 13, 2) || ':' || substr(recorded_at, 16, 2)"                \
+    " ELSE replace(substr(recorded_at, 1, 19), 'T', ' ') END"
+
 BaselineDB::BaselineDB(const std::string &db_path) {
     const std::filesystem::path path(db_path);
     if (path.has_parent_path()) {
@@ -794,25 +803,31 @@ static AlertRecord ReadAlertRecord(sqlite3_stmt* stmt) {
     return r;
 }
 
-// 查询告警记录：支持 rule 过滤、今日过滤、数量限制
-std::vector<AlertRecord> BaselineDB::GetAlerts(const std::string &rule_filter, int limit,
+// 查询告警记录：支持 rule 过滤、severity 过滤、今日过滤、数量限制
+std::vector<AlertRecord> BaselineDB::GetAlerts(const std::string &rule_filter,
+                                               const std::string &severity_filter, int limit,
                                                bool today) {
     const AlertsColumns cols = ProbeAlertsColumns(db_);
     std::string sql = BuildAlertsSelect(cols) + " FROM alerts";
 
-    if (!rule_filter.empty() || today) {
-        sql += " WHERE ";
-    }
-
+    std::vector<std::string> conds;
     if (!rule_filter.empty()) {
-        sql += "(rule_id = ? OR rule_name = ?)";
+        conds.push_back("(rule_id = ? OR rule_name = ?)");
     }
-
+    if (!severity_filter.empty()) {
+        conds.push_back("severity = ?");
+    }
     if (today) {
-        if (!rule_filter.empty()) {
-            sql += " AND ";
+        conds.push_back("date(recorded_at) = date('now')");
+    }
+    if (!conds.empty()) {
+        sql += " WHERE ";
+        for (size_t i = 0; i < conds.size(); ++i) {
+            if (i > 0) {
+                sql += " AND ";
+            }
+            sql += conds[i];
         }
-        sql += "date(recorded_at) = date('now')";
     }
 
     sql += " ORDER BY recorded_at DESC LIMIT ?;";
@@ -825,6 +840,9 @@ std::vector<AlertRecord> BaselineDB::GetAlerts(const std::string &rule_filter, i
         sqlite3_bind_text(stmt, param_idx++, rule_filter.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, param_idx++, rule_filter.c_str(), -1, SQLITE_STATIC);
     }
+    if (!severity_filter.empty()) {
+        sqlite3_bind_text(stmt, param_idx++, severity_filter.c_str(), -1, SQLITE_STATIC);
+    }
     sqlite3_bind_int(stmt, param_idx, limit);
 
     std::vector<AlertRecord> results;
@@ -836,15 +854,65 @@ std::vector<AlertRecord> BaselineDB::GetAlerts(const std::string &rule_filter, i
     return results;
 }
 
+// 分级统计：severity × rule_id 聚合计数；since_cutoff 为归一化时间下限
+// （"YYYY-MM-DD HH:MM:SS"，空串 = 全部时间），与 GetMonitorEvents 同一比较口径
+std::vector<AlertStatRow> BaselineDB::GetAlertStats(const std::string &since_cutoff,
+                                                    const std::string &severity_filter) {
+    const std::string normalized_time = BG_ALERTS_NORMALIZED_TIME;
+    std::string sql = "SELECT severity, rule_id, COUNT(*) FROM alerts";
+
+    std::vector<std::string> conds;
+    if (!since_cutoff.empty()) {
+        conds.push_back("(" + normalized_time + ") >= ?");
+    }
+    if (!severity_filter.empty()) {
+        conds.push_back("severity = ?");
+    }
+    if (!conds.empty()) {
+        sql += " WHERE ";
+        for (size_t i = 0; i < conds.size(); ++i) {
+            if (i > 0) {
+                sql += " AND ";
+            }
+            sql += conds[i];
+        }
+    }
+    // 级别序 critical→low 固定，同级按计数降序、rule_id 字典序兜底
+    sql += " GROUP BY severity, rule_id ORDER BY CASE severity WHEN 'critical' THEN 0 "
+           "WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, "
+           "COUNT(*) DESC, rule_id;";
+
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        spdlog::error("Prepare alert stats query failed: {}", sqlite3_errmsg(db_));
+        return {};
+    }
+
+    int param_idx = 1;
+    if (!since_cutoff.empty()) {
+        sqlite3_bind_text(stmt, param_idx++, since_cutoff.c_str(), -1, SQLITE_TRANSIENT);
+    }
+    if (!severity_filter.empty()) {
+        sqlite3_bind_text(stmt, param_idx++, severity_filter.c_str(), -1, SQLITE_TRANSIENT);
+    }
+
+    std::vector<AlertStatRow> rows;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        AlertStatRow row;
+        const auto *sev = sqlite3_column_text(stmt, 0);
+        const auto *rid = sqlite3_column_text(stmt, 1);
+        row.severity = sev != nullptr ? reinterpret_cast<const char *>(sev) : "";
+        row.rule_id = rid != nullptr ? reinterpret_cast<const char *>(rid) : "";
+        row.count = sqlite3_column_int64(stmt, 2);
+        rows.push_back(row);
+    }
+    sqlite3_finalize(stmt);
+    return rows;
+}
+
 std::vector<AlertRecord> BaselineDB::GetMonitorEvents(const std::string& start,
                                                        const std::string& end) {
-    const std::string normalized_time = R"(CASE
-        WHEN length(recorded_at) >= 17 AND substr(recorded_at, 5, 1) != '-' THEN
-            substr(recorded_at, 1, 4) || '-' || substr(recorded_at, 5, 2) || '-' ||
-            substr(recorded_at, 7, 2) || ' ' || substr(recorded_at, 10, 2) || ':' ||
-            substr(recorded_at, 13, 2) || ':' || substr(recorded_at, 16, 2)
-        ELSE replace(substr(recorded_at, 1, 19), 'T', ' ')
-    END)";
+    const std::string normalized_time = BG_ALERTS_NORMALIZED_TIME;
 
     std::string sql = BuildAlertsSelect(ProbeAlertsColumns(db_)) + " FROM alerts";
     if (!start.empty() || !end.empty()) {

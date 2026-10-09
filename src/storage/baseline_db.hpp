@@ -99,6 +99,13 @@ struct AssetUpsertResult {
     int updated = 0;
 };
 
+// 告警分级统计行（W5 D3）：severity × rule_id 聚合计数
+struct AlertStatRow {
+    std::string severity;
+    std::string rule_id;
+    std::int64_t count = 0;
+};
+
 class BaselineDB {
 public:
     explicit BaselineDB(const std::string& db_path = "/var/lib/baseline-guard/baseline.db");
@@ -161,10 +168,16 @@ public:
     // 获取所有基线（用于报告生成）
     std::vector<BaselineRecord> GetAllBaselines();
 
-    // 查询告警记录：支持 rule 过滤、今日过滤、数量限制
+    // 查询告警记录：支持 rule 过滤、severity 过滤、今日过滤、数量限制
     std::vector<AlertRecord> GetAlerts(const std::string& rule_filter = "",
+                                        const std::string& severity_filter = "",
                                         int limit = 20,
                                         bool today = false);
+
+    // 分级统计（alerts --stats）：severity × rule_id 聚合计数，
+    // since_cutoff 为归一化时间下限（空串 = 全部时间），severity_filter 空串 = 全部级别
+    std::vector<AlertStatRow> GetAlertStats(const std::string& since_cutoff = "",
+                                            const std::string& severity_filter = "");
 
     // 查询 monitor 原始事件：时间边界均为包含式，空边界表示不限制
     std::vector<AlertRecord> GetMonitorEvents(const std::string& start = "",

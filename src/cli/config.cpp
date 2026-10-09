@@ -6,6 +6,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include "config.hpp"
+#include "severity.hpp"
 
 using namespace std;
 
@@ -118,6 +119,50 @@ static void parseAlertNode(const YAML::Node &alertNode, AlertConfig &alert) {
             spdlog::warn("无法解析 alert.throttle 值: {}", e.what());
         }
     }
+}
+
+// notify: 节点解析（告警外发，W5 D4；lenient：字段类型错告警并取默认值）
+static void parseNotifyNode(const YAML::Node &notifyNode, NotifyConfig &notify) {
+    if (notifyNode["enabled"]) {
+        try {
+            notify.enabled = notifyNode["enabled"].as<bool>();
+        } catch (const YAML::Exception &e) {
+            spdlog::warn("无法解析 notify.enabled 值: {}", e.what());
+        }
+    }
+    if (notifyNode["webhook_url"]) {
+        try {
+            notify.webhook_url = notifyNode["webhook_url"].as<string>();
+        } catch (const YAML::Exception &e) {
+            spdlog::warn("无法解析 notify.webhook_url 值: {}", e.what());
+        }
+    }
+    if (notifyNode["min_level"]) {
+        try {
+            const std::string level = notifyNode["min_level"].as<string>();
+            if (alert::SeverityIsValid(level)) {
+                notify.min_level = level;
+            } else {
+                spdlog::warn("notify.min_level 非法值 '{}'，保留默认 high", level);
+            }
+        } catch (const YAML::Exception &e) {
+            spdlog::warn("无法解析 notify.min_level 值: {}", e.what());
+        }
+    }
+    if (notifyNode["silence_minutes"]) {
+        try {
+            notify.silence_minutes = notifyNode["silence_minutes"].as<int>();
+            if (notify.silence_minutes < 0) {
+                spdlog::warn("notify.silence_minutes 负数非法，按 0（关闭静默）处理");
+                notify.silence_minutes = 0;
+            }
+        } catch (const YAML::Exception &e) {
+            spdlog::warn("无法解析 notify.silence_minutes 值: {}", e.what());
+        }
+    }
+    spdlog::info("[notify] enabled={} min_level={} silence={}min url={}",
+                 notify.enabled, notify.min_level, notify.silence_minutes,
+                 notify.webhook_url.empty() ? "(empty)" : "configured");
 }
 
 static void parseDbNode(const YAML::Node &dbNode, DbConfig &db) {
@@ -241,6 +286,11 @@ Config parseYamlFile(const string &filename) {
 
         if (root["alert"]) {
             parseAlertNode(root["alert"], config.alert);
+        }
+
+        // 解析 notify: 节点（告警外发 webhook）
+        if (root["notify"]) {
+            parseNotifyNode(root["notify"], config.notify);
         }
 
         // 解析 db: 节点（数据库保留策略）
@@ -580,6 +630,9 @@ bool tryParseYamlFile(const string &filename, Config &out, string &err) {
 
     if (root["alert"]) {
         parseAlertNode(root["alert"], out.alert);
+    }
+    if (root["notify"]) {
+        parseNotifyNode(root["notify"], out.notify);
     }
     if (root["db"]) {
         parseDbNode(root["db"], out.db);

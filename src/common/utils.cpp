@@ -1,4 +1,7 @@
 #include "utils.hpp"
+#include <algorithm>
+#include <cctype>
+#include <climits>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -96,6 +99,37 @@ bool TakeArgValue(int& idx, int argc, char* argv[], const std::string& /*opt*/, 
         return false;
     }
     target = argv[++idx];
+    return true;
+}
+
+bool ParseSinceSpec(const std::string& spec, long long& seconds_out) {
+    if (spec.size() < 2) {
+        return false;
+    }
+    long long multiplier = 0;
+    switch (spec.back()) {
+    case 's': multiplier = 1; break;
+    case 'm': multiplier = 60; break;
+    case 'h': multiplier = 3600; break;
+    case 'd': multiplier = 86400; break;
+    default: return false;
+    }
+    const std::string num_part = spec.substr(0, spec.size() - 1);
+    if (num_part.empty() ||
+        !std::all_of(num_part.begin(), num_part.end(),
+                     [](unsigned char c) { return std::isdigit(c); })) {
+        return false;
+    }
+    long long value = 0;
+    try {
+        value = std::stoll(num_part);
+    } catch (...) {
+        return false;
+    }
+    if (value <= 0 || value > LLONG_MAX / multiplier) {
+        return false;
+    }
+    seconds_out = value * multiplier;
     return true;
 }
 

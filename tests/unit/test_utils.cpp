@@ -7,6 +7,7 @@
 #include <iostream>
 #include <sstream>
 #include <sys/stat.h>
+#include "severity.hpp"
 #include "utils.hpp"
 
 std::string write_temp_file(const std::string &content, const std::string &name = "testfile") {
@@ -88,6 +89,47 @@ void test_log_fail() {
     printf("  [PASS] UTL-014: log_fail输出\n");
 }
 
+// ====== UTL-015: ParseSinceSpec 合法规格 ======
+void test_since_spec_valid() {
+    long long sec = 0;
+    assert(ParseSinceSpec("1h", sec) && sec == 3600);
+    assert(ParseSinceSpec("24h", sec) && sec == 86400);
+    assert(ParseSinceSpec("30m", sec) && sec == 1800);
+    assert(ParseSinceSpec("7d", sec) && sec == 7 * 86400);
+    assert(ParseSinceSpec("45s", sec) && sec == 45);
+    printf("  [PASS] UTL-015: ParseSinceSpec 合法规格\n");
+}
+
+// ====== UTL-016: ParseSinceSpec 非法规格 ======
+void test_since_spec_invalid() {
+    long long sec = -1;
+    assert(!ParseSinceSpec("", sec));
+    assert(!ParseSinceSpec("h", sec));
+    assert(!ParseSinceSpec("abc", sec));
+    assert(!ParseSinceSpec("1x", sec));
+    assert(!ParseSinceSpec("0h", sec));
+    assert(!ParseSinceSpec("-5h", sec));
+    assert(!ParseSinceSpec("1.5h", sec));
+    assert(!ParseSinceSpec("99999999999999999999h", sec));
+    printf("  [PASS] UTL-016: ParseSinceSpec 非法规格\n");
+}
+
+// ====== UTL-017: 四级 severity 枚举解析（CLI --severity 过滤参数） ======
+void test_severity_parse() {
+    alert::Severity sev;
+    assert(alert::SeverityFromString("critical", sev) && sev == alert::Severity::Critical);
+    assert(alert::SeverityFromString("high", sev) && sev == alert::Severity::High);
+    assert(alert::SeverityFromString("medium", sev) && sev == alert::Severity::Medium);
+    assert(alert::SeverityFromString("low", sev) && sev == alert::Severity::Low);
+    assert(!alert::SeverityFromString("urgent", sev));
+    assert(!alert::SeverityFromString("", sev));
+    assert(!alert::SeverityFromString("HIGH", sev)); // 大小写敏感，与 DSL 一致
+    assert(alert::SeverityIsValid("critical") && !alert::SeverityIsValid("trace"));
+    assert(std::string(alert::SeverityDefault()) == "medium");
+    assert(std::string(alert::SeverityToString(alert::Severity::Critical)) == "critical");
+    printf("  [PASS] UTL-017: 四级 severity 枚举解析\n");
+}
+
 int main() {
     printf("=== test_utils ===\n");
     test_sha256_hello();
@@ -97,6 +139,9 @@ int main() {
     test_mode_string();
     test_log_pass();
     test_log_fail();
+    test_since_spec_valid();
+    test_since_spec_invalid();
+    test_severity_parse();
     printf("=== all utils tests passed ===\n");
     return 0;
 }

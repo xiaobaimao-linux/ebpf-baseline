@@ -23,6 +23,14 @@ struct DbConfig {
     int retention_max_records = 10000; // 告警最大记录数：默认1万条，0=不限制
 };
 
+// 告警外发配置（独立节点 notify:，W5 D4；webhook 为首个渠道）
+struct NotifyConfig {
+    bool enabled = false;              // 外发总开关，默认关闭（行为与旧版本一致）
+    std::string webhook_url;           // webhook POST 地址，空=不外发
+    std::string min_level = "high";    // 外发最低级别：critical/high 外发，medium/low 仅落库
+    int silence_minutes = 10;          // 静默窗口：同 (rule_id, 对象) 窗口内只外发 1 次，0=关闭
+};
+
 // 遥测配置（独立节点 telemetry:）
 struct TelemetryConfig {
     bool network = false;              // 网络连接事件遥测（connect/accept/bind），默认关闭
@@ -46,8 +54,9 @@ struct RuleEngineConfig {
 
 struct Config {
     std::vector<Rule> rules;
-    AlertConfig alert;   // 
+    AlertConfig alert;   //
     DbConfig db;         // 数据库保留策略配置
+    NotifyConfig notify; // 告警外发（webhook 渠道，SIGHUP 热加载）
     TelemetryConfig telemetry;  // 遥测开关
     RuleEngineConfig rule_engine;  // DSL 规则引擎
 };

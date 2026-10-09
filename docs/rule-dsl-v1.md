@@ -35,7 +35,7 @@
 | `desc` | 是 | 一句话描述 |
 | `condition` | 是 | 条件表达式，语法见 §4 |
 | `output` | 是 | 告警文本模板，`%字段路径` 插值（见 §5） |
-| `priority` | 是 | 严重等级，见 §6 |
+| `priority` | 否 | 严重等级，见 §6（W5 D3 起可选，缺省 `medium`） |
 | `attack` | 是 | ATT&CK 映射，见 §6 |
 | `fpr_note` | 是 | 误报说明（什么正常行为会命中、怎么调） |
 | `response` | 是 | 处置建议 |
@@ -101,7 +101,7 @@ list        := "(" literal ( "," literal )* ")"        # 仅作 in 的右操作�
 
 ## 6. 规则元数据
 
-- `priority`（严重等级）：枚举 `critical | high | medium | low`。
+- `priority`（严重等级）：枚举 `critical | high | medium | low`；可选，缺省补 `medium`（解析不报错，W5 D3）。枚举定义见公共头 `src/common/severity.hpp`。
   - 偏离 Falco 的说明：Falco 是八级（EMERGENCY…DEBUG），v1 裁剪为四级，与现有 alerts 表 severity 取值体系（low/medium，W3 起）一致，避免 priority/severity 双字段冗余与映射表维护。落库 alerts.severity 存原值。
 - `attack`：ATT&CK 技术 ID 列表，元素形如 `T1059`、`T1003.001`（子技术可带点号）；战术层可选，写作 `TA0002`。仅做映射标注与落库（alerts.attack 列，W4 新增），v1 不做 tactic 推导。
 - `fpr_note`：误报说明——什么正常业务行为会命中、建议的调参方向（加白名单/收窄路径）。

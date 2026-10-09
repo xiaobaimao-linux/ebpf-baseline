@@ -83,7 +83,7 @@ struct Rule {
     std::string name; // rule（全局唯一）
     std::string desc;
     std::string output_template; // output（%字段路径 插值）
-    std::string priority;        // critical/high/medium/low
+    std::string priority;        // critical/high/medium/low（可选，缺省 medium）
     std::vector<std::string> attack;
     std::string fpr_note;
     std::string response;

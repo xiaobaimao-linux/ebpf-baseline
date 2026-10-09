@@ -8,14 +8,11 @@
 
 #include "condition_parser.hpp"
 #include "rule_engine.hpp"
+#include "severity.hpp"
 
 namespace detect {
 
 namespace {
-
-bool is_priority_valid(const std::string &p) {
-    return p == "critical" || p == "high" || p == "medium" || p == "low";
-}
 
 std::string err_at(const std::string &file, const YAML::Mark &mark, const std::string &reason) {
     return file + ":" + std::to_string(mark.line + 1) + ": " + reason;
@@ -35,8 +32,8 @@ bool load_file(const std::string &path, std::set<std::string> &names, std::vecto
         return false;
     }
 
-    static const char *kRequired[] = {"rule",     "desc",   "condition", "output",
-                                      "priority", "attack", "fpr_note",  "response"};
+    static const char *kRequired[] = {"rule", "desc", "condition", "output",
+                                      "attack", "fpr_note", "response"};
 
     for (const auto &item : root) {
         if (!item.IsMap()) {
@@ -56,7 +53,9 @@ bool load_file(const std::string &path, std::set<std::string> &names, std::vecto
             rule.name = item["rule"].as<std::string>();
             rule.desc = item["desc"].as<std::string>();
             rule.output_template = item["output"].as<std::string>();
-            rule.priority = item["priority"].as<std::string>();
+            // priority 可选（W5 D3）：缺省补 medium，不报错
+            rule.priority = item["priority"] ? item["priority"].as<std::string>()
+                                             : alert::SeverityDefault();
             rule.fpr_note = item["fpr_note"].as<std::string>();
             rule.response = item["response"].as<std::string>();
         } catch (const YAML::Exception &e) {
@@ -72,7 +71,7 @@ bool load_file(const std::string &path, std::set<std::string> &names, std::vecto
             err = err_at(path, item["rule"].Mark(), "规则名全局重复: " + rule.name);
             return false;
         }
-        if (!is_priority_valid(rule.priority)) {
+        if (!alert::SeverityIsValid(rule.priority)) {
             err =
                 err_at(path, item["priority"].Mark(),
                        "非法 priority 值: " + rule.priority + "（枚举 critical/high/medium/low）");
