@@ -160,8 +160,20 @@ static void parseNotifyNode(const YAML::Node &notifyNode, NotifyConfig &notify) 
             spdlog::warn("无法解析 notify.silence_minutes 值: {}", e.what());
         }
     }
-    spdlog::info("[notify] enabled={} min_level={} silence={}min url={}",
+    if (notifyNode["aggregation_window_minutes"]) {
+        try {
+            notify.aggregation_window_minutes = notifyNode["aggregation_window_minutes"].as<int>();
+            if (notify.aggregation_window_minutes < 0) {
+                spdlog::warn("notify.aggregation_window_minutes 负数非法，按 0（关闭聚合）处理");
+                notify.aggregation_window_minutes = 0;
+            }
+        } catch (const YAML::Exception &e) {
+            spdlog::warn("无法解析 notify.aggregation_window_minutes 值: {}", e.what());
+        }
+    }
+    spdlog::info("[notify] enabled={} min_level={} silence={}min agg_window={}min url={}",
                  notify.enabled, notify.min_level, notify.silence_minutes,
+                 notify.aggregation_window_minutes,
                  notify.webhook_url.empty() ? "(empty)" : "configured");
 }
 

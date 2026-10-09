@@ -48,6 +48,8 @@ notify:
   webhook_url: ""            # HTTP POST JSON 目标，如 http://127.0.0.1:9000/alert
   min_level: "high"          # 外发最低级别：critical/high 外发，medium/low 仅落库
   silence_minutes: 10        # 同 (rule_id, 对象) 静默窗口，窗口内重复仅落库；0=关闭
+  aggregation_window_minutes: 5  # 同 (rule_id, 对象) 聚合窗口：窗内重复合并，窗末补发
+                             # occurrences=N 摘要（仅外发侧，落库逐条不变）；0=关闭
 
 # ── 资产采集（asset collect 周期任务，与事件链路无关）──
 asset:

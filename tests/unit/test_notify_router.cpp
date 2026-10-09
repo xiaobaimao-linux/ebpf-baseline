@@ -92,12 +92,30 @@ void test_silence_window() {
     printf("  [PASS] NRT-004: 静默窗口判定\n");
 }
 
+// ====== NRT-005: 聚合窗口动作（W5 D5）======
+void test_aggregation_action() {
+    const auto t0 = steady_clock::now();
+
+    // 无窗口 → 开新窗并立即发（首条不延迟）
+    assert(notify::AggregationAction(false, t0, t0, 300) == notify::AggAction::kOpenAndSend);
+    // 窗口活跃 → 合并（窗内任意点，含边界前 1s）
+    assert(notify::AggregationAction(true, t0, t0, 300) == notify::AggAction::kMerge);
+    assert(notify::AggregationAction(true, t0, t0 + seconds(299), 300) == notify::AggAction::kMerge);
+    // 窗口到期（含边界）→ 先 flush 旧窗摘要，本条开新窗立即发
+    assert(notify::AggregationAction(true, t0, t0 + seconds(300), 300) == notify::AggAction::kFlushAndSend);
+    assert(notify::AggregationAction(true, t0, t0 + seconds(600), 300) == notify::AggAction::kFlushAndSend);
+    // 窗口 <=0 → 聚合关闭语义：恒为开窗直发（调用方以 cfg>0 为前置，此处防御）
+    assert(notify::AggregationAction(true, t0, t0, 0) == notify::AggAction::kFlushAndSend);
+    printf("  [PASS] NRT-005: 聚合窗口动作\n");
+}
+
 int main() {
     printf("=== test_notify_router ===\n");
     test_route_matrix();
     test_route_edge();
     test_silence_object_key();
     test_silence_window();
+    test_aggregation_action();
     printf("=== all notify_router tests passed ===\n");
     return 0;
 }

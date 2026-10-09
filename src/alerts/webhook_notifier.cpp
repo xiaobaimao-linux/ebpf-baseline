@@ -40,6 +40,12 @@ bool WebhookNotifier::Send(const AlertEvent& alert) {
     payload["container_id"] = alert.container_id;
     payload["ancestors"]    = alert.ancestors;
     payload["attack"]       = alert.attack;
+    // 聚合摘要字段（W5 D5）：普通告警恒 1；摘要告警为窗口内合并条数，附首末时间
+    payload["occurrences"]  = alert.occurrences;
+    if (!alert.first_seen.empty()) {
+        payload["first_seen"] = alert.first_seen;
+        payload["last_seen"]  = alert.last_seen;
+    }
 
     CURL* curl = curl_easy_init();
     if (!curl) {

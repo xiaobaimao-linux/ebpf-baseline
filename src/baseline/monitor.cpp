@@ -242,12 +242,12 @@ static void log_suppressed_stats(const AlertManager* alert_mgr = nullptr) {
         for (const auto& [rule_id, n] : alert_mgr->ThrottledByRule())
             spdlog::info("[alerts] throttled: rule={} count={}", rule_id, n);
     }
-    // 外发计数（W5 D4）：有任一非零才打行
+    // 外发计数（W5 D4/D5）：有任一非零才打行
     if (alert_mgr != nullptr) {
         const NotifyStats ns = alert_mgr->GetNotifyStats();
-        if (ns.sent > 0 || ns.failed > 0 || ns.suppressed > 0 || ns.dropped > 0) {
-            spdlog::info("[notify] stats: sent={} failed={} suppressed={} dropped={}",
-                         ns.sent, ns.failed, ns.suppressed, ns.dropped);
+        if (ns.sent > 0 || ns.failed > 0 || ns.suppressed > 0 || ns.dropped > 0 || ns.merged > 0) {
+            spdlog::info("[notify] stats: sent={} failed={} suppressed={} dropped={} merged={}",
+                         ns.sent, ns.failed, ns.suppressed, ns.dropped, ns.merged);
         }
     }
 }

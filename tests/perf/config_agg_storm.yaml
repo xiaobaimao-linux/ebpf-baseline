@@ -1,0 +1,44 @@
+# W5 D5 聚合降噪验证配置：与 config_storm.yaml 同风暴口径，差异：
+#   alert.throttle: 0           —— 关闭 AlertManager 冷却，告警逐条落库 + 逐条进 Dispatcher
+#   notify.enabled + 本地 sink  —— 外发走 webhook 到 127.0.0.1:18080（python 接收端）
+#   silence_minutes: 0          —— 关闭静默，隔离聚合变量
+#   aggregation_window_minutes: 1 —— 聚合窗 60s（生产默认 5min；压测缩窗以便 5min 风暴翻多个窗）
+# 预期：~10,000 条告警进 Dispatcher，外发 ≈ 窗数×2（开窗首条 + 窗末摘要），降幅 ≥80%
+telemetry:
+  network: false
+  dns: false
+  privilege: false
+  store: true
+  events_db: "events_perf.db"
+  batch_size: 500
+  batch_ms: 200
+
+rules:
+  - id: "STORM-SRC"
+    name: "storm-event-source"
+    severity: "low"
+    monitor:
+      path: "/tmp/bg-storm/storm_target.txt"
+      events: ["read"]
+      action: "allow"
+
+rule_engine:
+  enabled: true
+  rules_dir: "rules/storm"
+
+alert:
+  dingtalk:
+    webhook: ""
+    secret: ""
+  throttle: 0           # 关冷却：聚合是唯一降噪变量，落库必须逐条
+
+notify:
+  enabled: true
+  webhook_url: "http://127.0.0.1:18080/hook"
+  min_level: "low"      # 风暴规则 priority=low，全级别放行
+  silence_minutes: 0
+  aggregation_window_minutes: 1
+
+db:
+  retention_days: 30
+  retention_max_records: 0   # 关闭数量上限：本测试要求落库逐条可全量对账（默认 1 万会触发清理）

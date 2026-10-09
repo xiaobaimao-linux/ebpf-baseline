@@ -77,6 +77,12 @@ AlertManager::AlertManager() {
 }
 
 AlertManager::~AlertManager() {
+    // 进程退出前打最终外发计数（对账口径；周期 tick 可能滞后于最后几条发送）
+    const NotifyStats ns = notify_dispatcher_.Stats();
+    if (ns.sent > 0 || ns.failed > 0 || ns.suppressed > 0 || ns.dropped > 0 || ns.merged > 0) {
+        spdlog::info("[notify] final stats: sent={} failed={} suppressed={} dropped={} merged={}",
+                     ns.sent, ns.failed, ns.suppressed, ns.dropped, ns.merged);
+    }
     curl_global_cleanup();
 }
 
@@ -97,8 +103,9 @@ void AlertManager::SetDB(BaselineDB* db) {
 
 void AlertManager::UpdateNotifyConfig(const NotifyConfig& notify_cfg) {
     notify_dispatcher_.UpdateConfig(notify_cfg);
-    spdlog::info("[notify] config applied: enabled={} min_level={} silence={}min",
-                 notify_cfg.enabled, notify_cfg.min_level, notify_cfg.silence_minutes);
+    spdlog::info("[notify] config applied: enabled={} min_level={} silence={}min agg_window={}min",
+                 notify_cfg.enabled, notify_cfg.min_level, notify_cfg.silence_minutes,
+                 notify_cfg.aggregation_window_minutes);
 }
 
 NotifyStats AlertManager::GetNotifyStats() const {

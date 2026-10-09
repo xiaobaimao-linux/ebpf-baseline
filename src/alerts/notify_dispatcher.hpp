@@ -14,12 +14,24 @@
 #include "notifier.hpp"
 
 // 外发计数（对账口径，自进程启动累计）：sent 成功 / failed 重试耗尽 /
-// suppressed 静默窗口内被抑制 / dropped 队列满丢弃
+// suppressed 静默窗口内被抑制 / dropped 队列满丢弃 / merged 聚合窗口内被合并。
+// 每条进入 Dispatch 且通过级别路由的告警恰好计一次：sent/failed/dropped/suppressed
+// 之一（独立外发尝试），或 merged（并入窗口）；聚合摘要为合成外发尝试，同样计
+// sent/failed/dropped/suppressed。
 struct NotifyStats {
     uint64_t sent = 0;
     uint64_t failed = 0;
     uint64_t suppressed = 0;
     uint64_t dropped = 0;
+    uint64_t merged = 0;
+};
+
+// 聚合窗口状态（W5 D5）：窗内被合并告警的计数与首末代表事件
+struct AggWindow {
+    std::chrono::steady_clock::time_point win_start;
+    int pending = 0;          // 窗内已合并、待摘要条数
+    AlertEvent first_evt;     // 首条被合并的告警（摘要 first_seen 来源）
+    AlertEvent last_evt;      // 末条被合并的告警（摘要代表事件，携带最新上下文）
 };
 
 // 异步外发调度器（W5 D4）：Dispatch 由消费线程调用，只做级别路由 +
@@ -44,6 +56,12 @@ public:
 
 private:
     void WorkerMain();
+    // 以下全部要求持有 mu_
+    void EnqueueWithSilence(const AlertEvent& evt, std::chrono::steady_clock::time_point now);
+    void FlushAggWindowLocked(std::unordered_map<std::string, AggWindow>::iterator it,
+                              std::chrono::steady_clock::time_point now);
+    void FlushExpiredAggLocked(std::chrono::steady_clock::time_point now);
+    std::chrono::steady_clock::time_point NextAggFlushDeadlineLocked() const;
 
     static constexpr size_t kMaxQueue = 1024;      // 队列上限，满则丢弃计 dropped
     static constexpr int kMaxRetries = 2;          // 失败后最多重试 2 次
@@ -54,6 +72,9 @@ private:
     std::shared_ptr<INotifier> notifier_;          // webhook 渠道（url 变更时整体换新）
     // 静默窗口：key = rule_id + "|" + 对象 key → 上次外发时间点
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_sent_;
+    // 聚合窗口（W5 D5）：key 与静默同款 → 窗口状态。窗内重复计 merged 并入窗口，
+    // 窗末（到期或翻窗）补发一条 occurrences=N 摘要。落库不受影响（Dispatch 前已逐条落库）
+    std::unordered_map<std::string, AggWindow> agg_windows_;
 
     std::queue<AlertEvent> queue_;                 // 与 mu_ 同锁
     std::condition_variable cv_;
@@ -64,4 +85,5 @@ private:
     std::atomic<uint64_t> failed_{0};
     std::atomic<uint64_t> suppressed_{0};
     std::atomic<uint64_t> dropped_{0};
+    std::atomic<uint64_t> merged_{0};
 };

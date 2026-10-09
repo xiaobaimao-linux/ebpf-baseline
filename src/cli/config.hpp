@@ -29,6 +29,9 @@ struct NotifyConfig {
     std::string webhook_url;           // webhook POST 地址，空=不外发
     std::string min_level = "high";    // 外发最低级别：critical/high 外发，medium/low 仅落库
     int silence_minutes = 10;          // 静默窗口：同 (rule_id, 对象) 窗口内只外发 1 次，0=关闭
+    int aggregation_window_minutes = 5;  // 聚合窗口：同 (rule_id, 对象) 窗口内重复告警合并，
+                                         // 窗末补发一条 occurrences=N 摘要；0=关闭。
+                                         // 摘要仍受静默窗口约束，建议聚合窗口 >= 静默窗口
 };
 
 // 遥测配置（独立节点 telemetry:）

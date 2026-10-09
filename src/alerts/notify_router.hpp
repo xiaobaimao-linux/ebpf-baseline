@@ -53,4 +53,25 @@ inline bool SilenceWindowActive(std::chrono::steady_clock::time_point last_sent,
     return now - last_sent < std::chrono::seconds(window_seconds);
 }
 
+// 聚合窗口动作（W5 D5 聚合降噪）：同 key（rule_id + SilenceObjectKey，与静默同 key）
+// 窗口内重复告警合并为窗末一条 occurrences=N 摘要。窗口活跃判定复用静默窗口语义。
+enum class AggAction {
+    kOpenAndSend,    // 无窗口：本条开新窗并立即外发（首条不延迟）
+    kMerge,          // 窗口活跃：并入窗口，不外发（计 merged），窗末摘要统一补发
+    kFlushAndSend,   // 窗口到期：先补发旧窗摘要（若有合并），本条开新窗并立即外发
+};
+
+inline AggAction AggregationAction(bool window_exists,
+                                   std::chrono::steady_clock::time_point win_start,
+                                   std::chrono::steady_clock::time_point now,
+                                   int window_seconds) {
+    if (!window_exists) {
+        return AggAction::kOpenAndSend;
+    }
+    if (SilenceWindowActive(win_start, now, window_seconds)) {
+        return AggAction::kMerge;
+    }
+    return AggAction::kFlushAndSend;
+}
+
 }  // namespace notify

@@ -1,0 +1,54 @@
+# W5 D5 任务2 常态测量配置：仓库主配置全功能开（遥测 + DSL 规则引擎 + FIM 规则），
+# 差异仅 notify 打开并指向本地 sink（空转无告警，只验证外发链路待命开销）
+telemetry:
+  network: true
+  dns: true
+  privilege: true
+  store: true
+  events_db: "events.db"
+  batch_size: 500
+  batch_ms: 200
+
+rule_engine:
+  enabled: true
+  rules_dir: "rules/examples"
+
+rules:
+  - id: "W2-FILE-001"
+    name: "监控敏感文件读取 - /etc/shadow"
+    severity: "critical"
+    monitor:
+      path: "/etc/shadow"
+      events: ["read", "write", "delete", "chmod"]
+      action: "alert"
+
+  - id: "W2-FILE-002"
+    name: "监控 /tmp/fimtest_target.txt"
+    severity: "medium"
+    monitor:
+      path: "/tmp/fimtest_target.txt"
+      events: ["write", "delete", "chmod"]
+      action: "alert"
+
+alert:
+  dingtalk:
+    webhook: ""
+    secret: ""
+  throttle: 300
+
+notify:
+  enabled: true
+  webhook_url: "http://127.0.0.1:18080/hook"
+  min_level: "high"
+  silence_minutes: 10
+  aggregation_window_minutes: 5
+
+asset:
+  model_scan_dirs:
+    - "~/.cache/huggingface"
+    - "/data"
+    - "/models"
+
+db:
+  retention_days: 30
+  retention_max_records: 10000
