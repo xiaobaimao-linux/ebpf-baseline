@@ -1,0 +1,43 @@
+# 凭据类核心规则（TA0006 Credential Access 为主）——W6 D1
+# 引擎约束：file.* 事件仅覆盖 config.yaml rules: 里注册的 inode（G6），
+# 规则内路径必须与监控配置双侧一致；测试替身路径的选择理由见各规则 fpr_note 与 tests/attack-cases/README.md。
+
+# cred-read-shadow：示例规则 Read Etc Shadow By Unusual Process 的扩充变体（原规则保留）
+- rule: Cred Read Shadow Whitelist
+  desc: 非白名单进程读取 /etc/shadow 或 /etc/gshadow，疑似凭据窃取；示例规则的扩充变体（加 /etc/gshadow、扩白名单、ATT&CK 细化到 T1003.008），原示例规则保留不动
+  condition: event_type = file.read and file.path in (/etc/shadow, /etc/gshadow) and not process.exe in (/usr/bin/passwd, /bin/passwd, /usr/sbin/sshd, /usr/bin/sudo, /bin/sudo, /usr/bin/chage, /usr/sbin/chage, /usr/sbin/unix_chkpwd, /usr/bin/su, /bin/su, /usr/bin/login, /bin/login, /usr/bin/newgrp, /usr/sbin/pwck, /usr/sbin/grpck)
+  output: "敏感凭据文件被读取 (rule=%rule.name exe=%process.exe pid=%process.pid uid=%process.uid file=%file.path container=%container.container_id)"
+  priority: high
+  attack: [T1003.008, TA0006]
+  fpr_note: 备份软件、配置管理 agent、安全巡检会周期性读取；pwck/grpck/login/newgrp 已按本机实测合法读取者补入白名单，现场再有命中按 exe 补白即可
+  response: 确认进程合法性；非预期则沿祖先链溯源启动者，检查是否伴随提权（priv.setuid）与外联，冻结进程并取证
+
+# cred-write-passwd：写 /etc/passwd（任何进程）
+- rule: Cred Write Etc Passwd
+  desc: 任何进程写入 /etc/passwd，疑似创建/篡改本地账户（持久化）；/tmp/bg-attack-cases/passwd-copy 是攻击用例的测试替身路径，生产部署可从列表移除
+  condition: event_type = file.write and file.path in (/etc/passwd, /tmp/bg-attack-cases/passwd-copy)
+  output: "/etc/passwd 被写入 (rule=%rule.name exe=%process.exe pid=%process.pid uid=%process.uid file=%file.path container=%container.container_id)"
+  priority: high
+  attack: [T1136, TA0006]
+  fpr_note: useradd/usermod/passwd 等账户管理命令正常写入 /etc/passwd，属预期命中，按变更工单核对执行者即可；因安全约束攻击用例不写真实 /etc/passwd，改用替身路径触发（选型理由见 tests/attack-cases/README.md）
+  response: 核对是否有账户变更工单；无工单则 diff /etc/passwd 与基线快照找新增/改动账户，检查该进程祖先链与提权痕迹，必要时回滚账户变更
+
+# cred-tamper-authorized-keys：写/删任意用户的 authorized_keys
+- rule: Cred Tamper Authorized Keys
+  desc: 写入或删除某用户的 ~/.ssh/authorized_keys，疑似植入 SSH 后门（持久化）；file 事件仅覆盖 monitor 注册的 inode，任意用户路径需在 config 逐一注册（G6）
+  condition: event_type in (file.write, file.unlink) and file.path contains /.ssh/authorized_keys and not process.exe in (/usr/sbin/sshd, /usr/bin/ssh-copy-id, /bin/ssh-copy-id)
+  output: "authorized_keys 被篡改 (rule=%rule.name exe=%process.exe pid=%process.pid uid=%process.uid file=%file.path container=%container.container_id)"
+  priority: critical
+  attack: [T1098.004, TA0006]
+  fpr_note: 用户手工编辑、ssh-copy-id（已白名单）、配置管理（ansible authorized_key 模块）推送公钥会命中；将部署工具 exe 加入白名单即可收敛；unlink 常见于替换式改写（先删后建）
+  response: 提取写入的公钥指纹并与资产库比对；非预期公钥立即移除并排查写入进程的入侵路径；检查同主机其它用户的 authorized_keys 与 sshd 日志
+
+# cred-clear-history：清空/删除 shell 历史（history -c 为内建不可见，G1）
+- rule: Cred Clear Shell History
+  desc: 写入（含截断）或删除用户的 shell history 文件，疑似反取证；history -c 是 shell 内建、无 exec/文件事件且 cmdline 不可见（G1），本规则只覆盖文件层面的清空与删除
+  condition: event_type in (file.write, file.unlink) and (file.path contains /.bash_history or file.path contains /.zsh_history) and not process.exe in (/bin/bash, /usr/bin/bash, /bin/zsh, /usr/bin/zsh, /bin/sh, /usr/bin/sh)
+  output: "shell 历史被清空或删除 (rule=%rule.name exe=%process.exe pid=%process.pid uid=%process.uid file=%file.path container=%container.container_id)"
+  priority: medium
+  attack: [T1070.003, TA0005]
+  fpr_note: 交互式 shell 退出时 bash 自身追加 history 已由 exe 白名单豁免（否则每次正常登出都告警）；用户主动 shred/truncate 清理隐私属双义行为会命中；对 bash 内建 history -c/-w 不可见是刻意取舍（豁免 bash 才压得住登出噪声）
+  response: 结合该用户近期命令审计与外联事件判断反取证意图；检查是否伴随其它痕迹清理（日志删除、时间戳篡改）；必要时从备份恢复 history 取证

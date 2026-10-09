@@ -1,0 +1,45 @@
+# 执行类核心规则（TA0002 Execution）——W6 D1
+# 引擎约束（详见 docs/rule-engine-gaps.md）：
+#   - v1 无 cmdline/argv（G1）、无 fd/socket 关联（G2），反弹 shell 的 "-i + socket stdin"
+#     与 "socket/pty cmdline 特征" 不可表达，一律退化为 exec + 祖先链/exe 名单启发式；
+#   - network/dns/priv/ns 事件未接入规则引擎（G3），规则只用 file.* 与 process.exec。
+
+# exec-reverse-shell-bash：shell 被反弹 shell 常用父进程派生
+- rule: Exec Reverse Shell Under Interpreter
+  desc: bash/sh 等 shell 被 nc/socat/python/perl 等网络工具或解释器派生，疑似反弹 shell（-i 与 socket stdin 判定为引擎缺口 G1/G2，以父进程链近似）
+  condition: event_type = process.exec and process.exe in (/bin/bash, /usr/bin/bash, /bin/sh, /usr/bin/sh, /bin/dash, /usr/bin/dash, /bin/zsh, /usr/bin/zsh, /bin/ash) and process.ancestors[].comm in (nc, nc.openbsd, nc.traditional, ncat, netcat, socat, python, python2, python3, perl, php, ruby, lua, gawk, mawk, busybox)
+  output: "疑似反弹 shell：shell 由解释器/网络工具派生 (rule=%rule.name exe=%process.exe pid=%process.pid ppid=%process.ppid uid=%process.uid container=%container.container_id)"
+  priority: critical
+  attack: [T1059.004, TA0002]
+  fpr_note: 配置管理（ansible/salt 以 python 派生 /bin/sh 执行模块）、数据处理管道（awk 调 system()）、包管理 maintainer 脚本会命中；确认是已知工具后可把对应父 comm 从列表移除
+  response: 查看该 shell 的祖先链（alerts.ancestors）确认启动者身份；非预期则检查同一进程链的后续外联与落盘文件，确认攻击后隔离主机并取证父进程镜像
+
+# exec-reverse-shell-interpreter：双用途网络工具执行（python/perl cmdline 特征不可表达，G1）
+- rule: Exec Reverse Shell Dual Use Tool
+  desc: nc/ncat/socat 等双用途网络工具被执行，是反弹 shell 与数据渗出的常见载体（python/perl 的 socket/pty 命令行特征受 G1 限制不可表达）
+  condition: event_type = process.exec and process.exe in (/bin/nc, /usr/bin/nc, /bin/ncat, /usr/bin/ncat, /bin/socat, /usr/bin/socat, /bin/netcat, /usr/bin/netcat, /bin/nc.openbsd, /usr/bin/nc.openbsd, /bin/nc.traditional, /usr/bin/nc.traditional)
+  output: "双用途网络工具执行 (rule=%rule.name exe=%process.exe pid=%process.pid ppid=%process.ppid uid=%process.uid container=%container.container_id)"
+  priority: high
+  attack: [T1059.006, TA0002]
+  fpr_note: 运维用 nc -zv 探测端口、socat 做本地转发是高频合法用途，会命中；建议结合祖先链人工研判（告警已携带 ancestors），或将运维固定入口（如特定跳板脚本）的 exe 加白
+  response: 确认执行者与目的端：关联同一时间窗的 network.connect 事件看外联目标；非运维操作则按反弹 shell 处置（断链、排查落地方、检查持久化）
+
+# exec-suspicious-tmp-binary：临时目录无扩展名可执行文件
+- rule: Exec Suspicious Tmp Binary
+  desc: 从 /tmp、/var/tmp、/dev/shm 执行无扩展名可执行文件，符合落盘即跑与伪装手法（"无扩展名"以 not contains . 近似，见 G4）
+  condition: event_type = process.exec and (process.exe startswith /tmp/ or process.exe startswith /var/tmp/ or process.exe startswith /dev/shm/) and not process.exe contains .
+  output: "临时目录执行可疑二进制 (rule=%rule.name exe=%process.exe pid=%process.pid ppid=%process.ppid uid=%process.uid container=%container.container_id)"
+  priority: high
+  attack: [T1204, T1036, TA0002]
+  fpr_note: 构建/测试系统在 /tmp 编译并执行（make check、pip/cargo 构建临时产物）会命中；"无扩展名"为近似判定（路径任一段含 . 即豁免，如 /tmp/.hidden 与 /tmp/v1.2/x 均不报）；可对固定构建目录追加 and not process.exe startswith <目录> 豁免
+  response: 提取该二进制哈希与来源（祖先链下载者）；查同主机是否出现持久化（authorized_keys、计划任务）；确认为恶意后清理文件并溯源入侵入口
+
+# exec-webspawner-shell：web 服务派生 shell（示例规则 Reverse Shell From Web Service 的扩充变体，原规则保留）
+- rule: Exec Webspawner Shell
+  desc: web 服务进程派生 shell，webshell 典型行为；是 rules/examples 示例规则的扩充变体（扩展 web 服务名单与 shell 名单），原示例规则保留不动
+  condition: event_type = process.exec and process.exe in (/bin/bash, /usr/bin/bash, /bin/sh, /usr/bin/sh, /bin/dash, /usr/bin/dash, /bin/zsh, /usr/bin/zsh, /bin/ash) and process.ancestors[].comm in (nginx, apache2, apache, httpd, php-fpm, php, php-cgi, java, tomcat, jetty, gunicorn, uwsgi, uvicorn, caddy, lighttpd, traefik, openresty, python, python3, puma)
+  output: "webshell 嫌疑：web 服务派生 shell (rule=%rule.name exe=%process.exe pid=%process.pid ppid=%process.ppid uid=%process.uid container=%container.container_id)"
+  priority: critical
+  attack: [T1505.003, TA0002]
+  fpr_note: 与示例规则重复覆盖 nginx 等常见服务；注意引擎单事件只报首个匹配规则（G8），core 先于 examples 加载，本规则命中时示例规则不再重复告警；node 刻意移出本规则名单——开发机上 vscode-server/npm 的 node 链会让所有 shell 命中（实测淹没告警通道，见 docs/fpr-w6d1.md），node webshell 场景由示例规则 Reverse Shell From Web Service 兜底覆盖；mod_wsgi/passenger 使 python 成为 web 祖先时运维脚本会命中；CI 发布经由 web 控制台执行 shell 亦属已知噪声，确认后可收窄 comm 列表
+  response: 立即排查 web 服务入侵痕迹（上传目录可执行文件、异常请求日志）；隔离主机，重建 web 服务容器/镜像；检查该 shell 后续的凭据读取与外联
